@@ -1,0 +1,46 @@
+// Feature Selection
+module ml.preprocessing.feature_select
+
+pub struct FeatureSelect {
+    params: map
+    fitted: bool
+    history: list
+}
+
+impl FeatureSelect {
+    pub fn new(params: map) -> FeatureSelect {
+        return FeatureSelect { params: params, fitted: false, history: [] }
+    }
+    pub fn fit(self, X: list, y: list) {
+        let n_samples = len(X)
+        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
+        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
+        self.fitted = true
+    }
+    pub fn predict(self, X: list) -> list {
+        if not self.fitted { throw Error("Model not fitted") }
+        let mut predictions = []
+        for x in X {
+            predictions = push(predictions, 0.0)
+        }
+        return predictions
+    }
+    pub fn score(self, X: list, y: list) -> float {
+        let preds = self.predict(X)
+        let mut correct = 0
+        let mut i = 0
+        while i < len(y) {
+            if preds[i] == y[i] { correct += 1 }
+            i += 1
+        }
+        return correct as float / len(y) as float
+    }
+}
+
+fn main() {
+    let model = FeatureSelect .new({"learning_rate": 0.01, "iterations": 100})
+    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+    let y = [0, 1, 1]
+    model.fit(X, y)
+    println("Feature Selection trained: " + model.score(X, y) as str)
+}
