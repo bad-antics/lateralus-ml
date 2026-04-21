@@ -1,46 +1,99 @@
-// One-Hot Encoding
+// One-Hot Encoding — convert categorical variable to binary indicator vectors.
+//
+//   "red"  → [1, 0, 0]
+//   "green"→ [0, 1, 0]
+//   "blue" → [0, 0, 1]
+//
+// Essential for models that expect numeric input (linear regression,
+// NN, SVM). For tree-based models (CART, random forest, XGBoost) one-hot
+// is usually unnecessary and can even hurt — use target / ordinal
+// encoding instead.
+//
+// Tradeoffs:
+//   + No false ordinal relationships
+//   − High cardinality explodes dimensionality → use hashing trick
+//     (FeatureHasher) or embedding for 1000+ categories
+//   − Sparse; use sparse matrix formats in production
+//
+// drop_first: remove one column to avoid the "dummy variable trap"
+// (perfect multicollinearity) in linear models with intercept.
+
 module ml.preprocessing.one_hot
 
-pub struct OneHot {
-    params: map
-    fitted: bool
-    history: list
+pub struct OneHot { pub categories: [int], pub drop_first: bool }
+
+pub fn fit(values: [int], drop_first: bool) -> OneHot {
+    let mut cats: [int] = []
+    let mut i = 0
+    while i < values.len() {
+        let mut found = false
+        let mut j = 0
+        while j < cats.len() { if cats[j] == values[i] { found = true; break }; j += 1 }
+        if !found { cats.push(values[i]) }
+        i += 1
+    }
+    // Sort categories for deterministic column ordering.
+    i = 0
+    while i < cats.len() {
+        let mut j = i + 1
+        while j < cats.len() {
+            if cats[j] < cats[i] { let t = cats[i]; cats[i] = cats[j]; cats[j] = t }
+            j += 1
+        }
+        i += 1
+    }
+    return OneHot { categories: cats, drop_first: drop_first }
 }
 
-impl OneHot {
-    pub fn new(params: map) -> OneHot {
-        return OneHot { params: params, fitted: false, history: [] }
+pub fn transform(oh: OneHot, value: int) -> [int] {
+    let mut vec: [int] = []
+    let start = if oh.drop_first { 1 } else { 0 }
+    let mut i = start
+    while i < oh.categories.len() {
+        vec.push(if oh.categories[i] == value { 1 } else { 0 })
+        i += 1
     }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
+    return vec
+}
+
+pub fn transform_batch(oh: OneHot, values: [int]) -> [[int]] {
+    let mut out: [[int]] = []
+    let mut i = 0
+    while i < values.len() { out.push(transform(oh, values[i])); i += 1 }
+    return out
+}
+
+pub fn inverse_transform(oh: OneHot, vec: [int]) -> int {
+    let start = if oh.drop_first { 1 } else { 0 }
+    let mut i = 0
+    while i < vec.len() {
+        if vec[i] == 1 { return oh.categories[start + i] }
+        i += 1
     }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+    // All zeros → reference category (dropped one) if drop_first=true.
+    if oh.drop_first { return oh.categories[0] }
+    return -1
+}
+
+/// Hashing trick for high cardinality — fixed dim, no fit stage.
+/// h(x) mod d. Collisions are expected but tolerable.
+pub fn hash_encode(value: int, d: int) -> [int] {
+    let mut vec: [int] = []
+    let mut i = 0
+    while i < d { vec.push(0); i += 1 }
+    // 64-bit multiplicative hash (Knuth)
+    let h = ((value as u64) * 2654435761u64) as int
+    let idx = ((h % d) + d) % d
+    vec[idx] = 1
+    return vec
 }
 
 fn main() {
-    let model = OneHot .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("One-Hot Encoding trained: " + model.score(X, y) as str)
+    let vals = [0, 1, 2, 1, 0, 2]       // three categories
+    let oh = fit(vals, false)
+    let enc = transform(oh, 1)
+    println("one-hot(1) = [0, 1, 0]: [" + enc[0] as str + "," + enc[1] as str + "," + enc[2] as str + "]")
+    println("inverse([0, 0, 1]) = 2: " + inverse_transform(oh, [0, 0, 1]) as str)
+    let h = hash_encode(42, 8)
+    println("hash 42 (dim 8) set-bits: " + (h[0] + h[1] + h[2] + h[3] + h[4] + h[5] + h[6] + h[7]) as str)
 }
