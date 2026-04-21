@@ -1,46 +1,147 @@
-// Cross Validation
+// Cross-validation — honest generalization-error estimation.
+//
+// k-Fold (Geisser 1975; Stone 1974):
+//   Partition data into k roughly-equal folds. For i = 1..k, train on
+//   the other k−1 folds and test on fold i. Report mean ± std.
+//
+// Leave-One-Out (LOOCV): k = n. Nearly unbiased but high variance
+// and expensive (k=n model fits).
+//
+// Stratified k-fold: preserves class distribution within each fold
+// (Kohavi 1995) — essential for imbalanced classification.
+//
+// Shuffle-split: Monte-Carlo CV; each split independently samples
+// a random test subset — unlike k-fold, folds may overlap.
+//
+// This module returns index arrays only; callers plug in their own
+// model fit/score pipeline.
+
 module ml.metrics.cross_validation
 
-pub struct CrossValidation {
-    params: map
-    fitted: bool
-    history: list
-}
+struct Rng { state: u64 }
+fn rng_new(seed: u64) -> Rng { return Rng { state: if seed == 0 { 1u64 } else { seed } } }
+fn rng_next(r: &mut Rng) -> u64 { let mut s = r.state; s ^= s >> 12; s ^= s << 25; s ^= s >> 27; r.state = s; return s * 2685821657736338717u64 }
+fn rng_range(r: &mut Rng, n: int) -> int { return (rng_next(r) as int % n + n) % n }
 
-impl CrossValidation {
-    pub fn new(params: map) -> CrossValidation {
-        return CrossValidation { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
+pub struct Fold { pub train: [int], pub test: [int] }
+
+/// k-Fold CV: returns k (train, test) index splits.
+pub fn kfold(n: int, k: int, shuffle: bool, seed: u64) -> [Fold] {
+    let mut idx: [int] = []
+    let mut i = 0
+    while i < n { idx.push(i); i += 1 }
+    if shuffle {
+        let mut rng = rng_new(seed)
+        i = n - 1
+        while i > 0 {
+            let j = rng_range(&mut rng, i + 1)
+            let t = idx[i]; idx[i] = idx[j]; idx[j] = t
+            i -= 1
         }
-        return predictions
     }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
+    let fold_sz = n / k
+    let remainder = n % k
+    let mut folds: [Fold] = []
+    let mut start = 0
+    let mut fi = 0
+    while fi < k {
+        let sz = fold_sz + (if fi < remainder { 1 } else { 0 })
+        let end = start + sz
+        let mut test: [int] = []; let mut train: [int] = []
+        i = 0
+        while i < n {
+            if i >= start && i < end { test.push(idx[i]) } else { train.push(idx[i]) }
             i += 1
         }
-        return correct as float / len(y) as float
+        folds.push(Fold { train: train, test: test })
+        start = end
+        fi += 1
     }
+    return folds
+}
+
+/// Leave-One-Out.
+pub fn loocv(n: int) -> [Fold] {
+    let mut folds: [Fold] = []
+    let mut i = 0
+    while i < n {
+        let mut tr: [int] = []
+        let mut j = 0
+        while j < n { if j != i { tr.push(j) }; j += 1 }
+        folds.push(Fold { train: tr, test: [i] })
+        i += 1
+    }
+    return folds
+}
+
+/// Stratified k-fold: preserves class proportions per label.
+pub fn stratified_kfold(y: [int], k: int, seed: u64) -> [Fold] {
+    let n = y.len()
+    // Group indices by label.
+    let mut labs: [int] = []; let mut groups: [[int]] = []
+    let mut i = 0
+    while i < n {
+        let mut found = false
+        let mut j = 0
+        while j < labs.len() {
+            if labs[j] == y[i] { groups[j].push(i); found = true; break }
+            j += 1
+        }
+        if !found { labs.push(y[i]); groups.push([i]) }
+        i += 1
+    }
+    // Initialize empty test sets per fold.
+    let mut test_sets: [[int]] = []
+    let mut fi = 0
+    while fi < k { test_sets.push([]); fi += 1 }
+    let mut rng = rng_new(seed)
+    // Assign each class's indices round-robin after shuffling.
+    let mut g = 0
+    while g < groups.len() {
+        let mut grp = groups[g]
+        // Shuffle
+        let mut ii = grp.len() - 1
+        while ii > 0 {
+            let jj = rng_range(&mut rng, ii + 1)
+            let t = grp[ii]; grp[ii] = grp[jj]; grp[jj] = t
+            if ii == 0 { break }
+            ii -= 1
+        }
+        let mut p = 0
+        while p < grp.len() {
+            test_sets[p % k].push(grp[p])
+            p += 1
+        }
+        g += 1
+    }
+    // Build folds.
+    let mut folds: [Fold] = []
+    fi = 0
+    while fi < k {
+        let ts = test_sets[fi]
+        let mut tr: [int] = []
+        let mut ii = 0
+        while ii < n {
+            let mut is_test = false
+            let mut j = 0
+            while j < ts.len() { if ts[j] == ii { is_test = true; break }; j += 1 }
+            if !is_test { tr.push(ii) }
+            ii += 1
+        }
+        folds.push(Fold { train: tr, test: ts })
+        fi += 1
+    }
+    return folds
 }
 
 fn main() {
-    let model = CrossValidation .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Cross Validation trained: " + model.score(X, y) as str)
+    let folds = kfold(10, 5, true, 42u64)
+    println("5-fold splits: " + folds.len() as str)
+    println("fold 0 test size: " + folds[0].test.len() as str)   // 2
+
+    let y = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1]
+    let sf = stratified_kfold(y, 5, 7u64)
+    println("stratified folds: " + sf.len() as str)
+    // Each test fold should have 1 positive and 1-2 negatives.
+    println("fold 0 test: " + sf[0].test.len() as str)
 }
