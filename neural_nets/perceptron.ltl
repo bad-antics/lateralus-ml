@@ -1,46 +1,55 @@
-// Perceptron
-module ml.neural_nets.perceptron
+// neural_nets/perceptron.ltl
+// Rosenblatt perceptron (1958). Online mistake-driven learning for linearly
+// separable data. For each (x, y in {-1, +1}):
+//   if y (w . x + b) <= 0:  w <- w + y x;  b <- b + y
+// Converges in <= (R/gamma)^2 steps (Novikoff 1962) where R = max|x|,
+// gamma = margin.
 
-pub struct Perceptron {
-    params: map
-    fitted: bool
-    history: list
+module neural_nets.perceptron
+
+pub struct Perceptron { w: [f64], b: f64 }
+
+pub fn new_perceptron(d: u64) -> Perceptron {
+    return Perceptron { w: zeros(d), b: 0.0 }
 }
 
-impl Perceptron {
-    pub fn new(params: map) -> Perceptron {
-        return Perceptron { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+pub fn predict(p: Perceptron, x: [f64]) -> i64 {
+    let d: u64 = len(x); let mut s: f64 = p.b; let mut i: u64 = 0
+    while i < d { s = s + p.w[i] * x[i]; i = i + 1 }
+    if s >= 0.0 { return 1 }
+    return -1
 }
 
-fn main() {
-    let model = Perceptron .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Perceptron trained: " + model.score(X, y) as str)
+pub fn fit(p: &mut Perceptron, X: [[f64]], y: [i64], epochs: u64) -> u64 {
+    let n: u64 = len(X); let d: u64 = len(X[0])
+    let mut total_updates: u64 = 0
+    let mut e: u64 = 0
+    while e < epochs {
+        let mut mistakes: u64 = 0
+        let mut i: u64 = 0
+        while i < n {
+            let yhat: i64 = predict(*p, X[i])
+            if yhat * y[i] <= 0 {
+                let mut j: u64 = 0
+                while j < d { p.w[j] = p.w[j] + (y[i] as f64) * X[i][j]; j = j + 1 }
+                p.b = p.b + (y[i] as f64)
+                mistakes = mistakes + 1
+                total_updates = total_updates + 1
+            }
+            i = i + 1
+        }
+        if mistakes == 0 { return total_updates }
+        e = e + 1
+    }
+    return total_updates
+}
+
+pub fn main() {
+    // AND gate over {-1, +1} labels.
+    let X: [[f64]] = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]]
+    let y: [i64]   = [-1, -1, -1, 1]
+    let mut p: Perceptron = new_perceptron(2)
+    let upd: u64 = fit(&mut p, X, y, 50)
+    print("updates=", upd, " w=", p.w, " b=", p.b)
+    print("preds=", predict(p, X[0]), predict(p, X[1]), predict(p, X[2]), predict(p, X[3]))
 }
