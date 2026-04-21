@@ -1,46 +1,97 @@
-// Confusion Matrix
+// Confusion matrix — the foundation of classification metrics.
+//
+//                 Predicted
+//                 +      −
+//    Actual  +   TP     FN
+//            −   FP     TN
+//
+// Derived quantities:
+//   Accuracy    = (TP + TN) / (TP + FP + TN + FN)
+//   Precision   = TP / (TP + FP)                          (positive predictive value)
+//   Recall      = TP / (TP + FN)                          (sensitivity, TPR)
+//   Specificity = TN / (TN + FP)                          (TNR)
+//   FPR         = FP / (FP + TN)                          (1 − specificity)
+//   FNR         = FN / (FN + TP)
+//   Balanced accuracy = (Recall + Specificity) / 2        (for imbalanced data)
+//   MCC = (TP·TN − FP·FN) /
+//         √((TP+FP)(TP+FN)(TN+FP)(TN+FN))                  (−1..+1, balanced)
+//
+// Multiclass: K×K matrix M[i][j] = #(actual=i, predicted=j).
+
 module ml.metrics.confusion_matrix
 
-pub struct ConfusionMatrix {
-    params: map
-    fitted: bool
-    history: list
+pub struct Binary { pub tp: int, pub fp: int, pub tn: int, pub fn_: int }
+
+pub fn binary(y_true: [int], y_pred: [int]) -> Binary {
+    let mut tp = 0; let mut fp = 0; let mut tn = 0; let mut fn_ = 0
+    let mut i = 0
+    while i < y_true.len() {
+        if y_true[i] == 1 && y_pred[i] == 1 { tp += 1 }
+        else if y_true[i] == 0 && y_pred[i] == 1 { fp += 1 }
+        else if y_true[i] == 0 && y_pred[i] == 0 { tn += 1 }
+        else { fn_ += 1 }
+        i += 1
+    }
+    return Binary { tp: tp, fp: fp, tn: tn, fn_: fn_ }
 }
 
-impl ConfusionMatrix {
-    pub fn new(params: map) -> ConfusionMatrix {
-        return ConfusionMatrix { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+pub fn accuracy(c: Binary) -> float {
+    let n = c.tp + c.fp + c.tn + c.fn_
+    return if n > 0 { ((c.tp + c.tn) as float) / (n as float) } else { 0.0 }
 }
+
+pub fn precision(c: Binary) -> float {
+    let d = c.tp + c.fp
+    return if d > 0 { (c.tp as float) / (d as float) } else { 0.0 }
+}
+
+pub fn recall(c: Binary) -> float {
+    let d = c.tp + c.fn_
+    return if d > 0 { (c.tp as float) / (d as float) } else { 0.0 }
+}
+
+pub fn specificity(c: Binary) -> float {
+    let d = c.tn + c.fp
+    return if d > 0 { (c.tn as float) / (d as float) } else { 0.0 }
+}
+
+pub fn balanced_accuracy(c: Binary) -> float {
+    return 0.5 * (recall(c) + specificity(c))
+}
+
+/// Matthews correlation coefficient — robust to class imbalance.
+pub fn mcc(c: Binary) -> float {
+    let num = (c.tp * c.tn - c.fp * c.fn_) as float
+    let d = ((c.tp + c.fp) as float) * ((c.tp + c.fn_) as float)
+          * ((c.tn + c.fp) as float) * ((c.tn + c.fn_) as float)
+    if d <= 0.0 { return 0.0 }
+    return num / sqrt(d)
+}
+
+/// K×K multiclass matrix with given label count K.
+pub fn multiclass(y_true: [int], y_pred: [int], k: int) -> [[int]] {
+    let mut m: [[int]] = []
+    let mut i = 0
+    while i < k {
+        let mut row: [int] = []
+        let mut j = 0
+        while j < k { row.push(0); j += 1 }
+        m.push(row); i += 1
+    }
+    i = 0
+    while i < y_true.len() { m[y_true[i]][y_pred[i]] += 1; i += 1 }
+    return m
+}
+
+fn sqrt(x: float) -> float { if x <= 0.0 { return 0.0 }; let mut g = x; let mut i = 0; while i < 40 { g = 0.5 * (g + x / g); i += 1 }; return g }
 
 fn main() {
-    let model = ConfusionMatrix .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Confusion Matrix trained: " + model.score(X, y) as str)
+    let yt = [1, 0, 1, 1, 0, 1, 0, 0, 1, 0]
+    let yp = [1, 0, 1, 0, 0, 1, 1, 0, 1, 0]
+    let c = binary(yt, yp)
+    println("TP=" + c.tp as str + " FP=" + c.fp as str + " TN=" + c.tn as str + " FN=" + c.fn_ as str)
+    println("acc  = " + accuracy(c) as str)    // 0.8
+    println("prec = " + precision(c) as str)   // 0.8
+    println("rec  = " + recall(c) as str)      // 0.8
+    println("MCC  = " + mcc(c) as str)         // 0.6
 }
