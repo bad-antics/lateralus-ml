@@ -1,46 +1,161 @@
-// Random Forest
+// Random Forest (Breiman 2001) — ensemble of decorrelated decision trees.
+//
+// For each of T trees:
+//   1. Draw a bootstrap sample of N rows with replacement
+//   2. At each split, consider only a random subset of m ≪ p features
+//   3. Grow the tree to maximum depth (no pruning)
+//
+// Prediction: majority vote (classification) or mean (regression).
+// OOB (out-of-bag) samples give a near-unbiased error estimate
+// without a held-out test set.
+//
+// Reduces variance vs. a single tree via:
+//   • bootstrap aggregation (bagging) averaging out noise
+//   • random feature selection decorrelating trees
+//
+// Defaults: m = √p for classification; m = p/3 for regression.
+
 module ml.supervised.random_forest
 
-pub struct RandomForest {
-    params: map
-    fitted: bool
-    history: list
+pub struct Node { pub is_leaf: bool, pub prediction: int,
+                  pub feature: int, pub threshold: float,
+                  pub left: int, pub right: int }
+pub struct Tree { pub nodes: [Node] }
+pub struct Forest { pub trees: [Tree] }
+
+struct Rng { state: u64 }
+fn rng_new(seed: u64) -> Rng { return Rng { state: if seed == 0 { 0xDEADBEEFu64 } else { seed } } }
+fn rng_next(r: &mut Rng) -> u64 { let mut s = r.state; s ^= s >> 12; s ^= s << 25; s ^= s >> 27; r.state = s; return s * 2685821657736338717u64 }
+fn rng_range(r: &mut Rng, n: int) -> int { return (rng_next(r) as int % n + n) % n }
+
+fn gini(y: [int]) -> float {
+    let n = y.len()
+    if n == 0 { return 0.0 }
+    let mut labs: [int] = []; let mut cnts: [int] = []
+    let mut i = 0
+    while i < n {
+        let mut j = 0; let mut found = false
+        while j < labs.len() { if labs[j] == y[i] { cnts[j] += 1; found = true; break }; j += 1 }
+        if !found { labs.push(y[i]); cnts.push(1) }
+        i += 1
+    }
+    let mut g = 1.0; let mut k = 0
+    while k < cnts.len() { let p = (cnts[k] as float) / (n as float); g -= p * p; k += 1 }
+    return g
 }
 
-impl RandomForest {
-    pub fn new(params: map) -> RandomForest {
-        return RandomForest { params: params, fitted: false, history: [] }
+fn majority(y: [int]) -> int {
+    let mut labs: [int] = []; let mut cnts: [int] = []
+    let mut i = 0
+    while i < y.len() {
+        let mut j = 0; let mut found = false
+        while j < labs.len() { if labs[j] == y[i] { cnts[j] += 1; found = true; break }; j += 1 }
+        if !found { labs.push(y[i]); cnts.push(1) }
+        i += 1
     }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
+    let mut best = 0
+    let mut j = 1
+    while j < cnts.len() { if cnts[j] > cnts[best] { best = j }; j += 1 }
+    return labs[best]
+}
+
+fn build_tree_rnd(x: [[float]], y: [int], depth: int, max_depth: int,
+                  m_try: int, rng: &mut Rng, nodes: &mut [Node]) -> int {
+    if depth >= max_depth || gini(y) == 0.0 || x.len() < 2 {
+        let id = nodes.len() as int
+        nodes.push(Node { is_leaf: true, prediction: majority(y),
+                          feature: -1, threshold: 0.0, left: -1, right: -1 })
+        return id
     }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
+    let p_feat = x[0].len()
+    let g_parent = gini(y)
+    let mut best_gain = 0.0; let mut best_feat = -1; let mut best_thr = 0.0
+    // Random subset of feature indices (sampling with replacement for simplicity).
+    let mut fi = 0
+    while fi < m_try {
+        let f = rng_range(rng, p_feat)
+        let pick = rng_range(rng, x.len())
+        let thr = x[pick][f]
+        let mut yl: [int] = []; let mut yr: [int] = []
         let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
+        while i < x.len() {
+            if x[i][f] <= thr { yl.push(y[i]) } else { yr.push(y[i]) }
             i += 1
         }
-        return correct as float / len(y) as float
+        if yl.len() > 0 && yr.len() > 0 {
+            let gain = g_parent
+                - ((yl.len() as float) / (x.len() as float)) * gini(yl)
+                - ((yr.len() as float) / (x.len() as float)) * gini(yr)
+            if gain > best_gain { best_gain = gain; best_feat = f; best_thr = thr }
+        }
+        fi += 1
     }
+    if best_feat < 0 {
+        let id = nodes.len() as int
+        nodes.push(Node { is_leaf: true, prediction: majority(y),
+                          feature: -1, threshold: 0.0, left: -1, right: -1 })
+        return id
+    }
+    let mut xl: [[float]] = []; let mut yl: [int] = []
+    let mut xr: [[float]] = []; let mut yr: [int] = []
+    let mut i = 0
+    while i < x.len() {
+        if x[i][best_feat] <= best_thr { xl.push(x[i]); yl.push(y[i]) }
+        else                           { xr.push(x[i]); yr.push(y[i]) }
+        i += 1
+    }
+    let id = nodes.len() as int
+    nodes.push(Node { is_leaf: false, prediction: -1, feature: best_feat,
+                      threshold: best_thr, left: -1, right: -1 })
+    let l = build_tree_rnd(xl, yl, depth + 1, max_depth, m_try, rng, nodes)
+    let r = build_tree_rnd(xr, yr, depth + 1, max_depth, m_try, rng, nodes)
+    nodes[id as int].left = l
+    nodes[id as int].right = r
+    return id
+}
+
+pub fn fit(x: [[float]], y: [int], n_trees: int, max_depth: int,
+            m_try: int, seed: u64) -> Forest {
+    let mut rng = rng_new(seed)
+    let mut trees: [Tree] = []
+    let n = x.len()
+    let mut t = 0
+    while t < n_trees {
+        // Bootstrap sample
+        let mut xb: [[float]] = []; let mut yb: [int] = []
+        let mut i = 0
+        while i < n { let idx = rng_range(&mut rng, n); xb.push(x[idx]); yb.push(y[idx]); i += 1 }
+        let mut nodes: [Node] = []
+        build_tree_rnd(xb, yb, 0, max_depth, m_try, &mut rng, &mut nodes)
+        trees.push(Tree { nodes: nodes })
+        t += 1
+    }
+    return Forest { trees: trees }
+}
+
+fn predict_tree(tr: Tree, x: [float]) -> int {
+    let mut i = 0
+    while true {
+        let n = tr.nodes[i]
+        if n.is_leaf { return n.prediction }
+        i = if x[n.feature] <= n.threshold { n.left as int } else { n.right as int }
+    }
+    return -1
+}
+
+pub fn predict(f: Forest, x: [float]) -> int {
+    let mut votes: [int] = []
+    let mut i = 0
+    while i < f.trees.len() { votes.push(predict_tree(f.trees[i], x)); i += 1 }
+    return majority(votes)
 }
 
 fn main() {
-    let model = RandomForest .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Random Forest trained: " + model.score(X, y) as str)
+    let x = [[1.0, 1.0], [1.0, 2.0], [2.0, 1.0], [2.0, 2.0],
+             [6.0, 6.0], [6.0, 7.0], [7.0, 6.0], [7.0, 7.0]]
+    let y = [0, 0, 0, 0, 1, 1, 1, 1]
+    let f = fit(x, y, 20, 4, 2, 42u64)
+    println("Pred (1.5, 1.5): " + predict(f, [1.5, 1.5]) as str)  // 0
+    println("Pred (6.5, 6.5): " + predict(f, [6.5, 6.5]) as str)  // 1
+    println("trees: " + f.trees.len() as str)
 }
