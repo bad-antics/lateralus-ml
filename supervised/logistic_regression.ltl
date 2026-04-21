@@ -1,46 +1,117 @@
-// Logistic Regression
+// Logistic regression — binary classification via sigmoid output.
+//
+//     P(y=1|x) = σ(wᵀx + b)     σ(z) = 1 / (1 + e^(-z))
+//
+// Maximum-likelihood estimate minimizes cross-entropy loss:
+//
+//     L = -1/n · Σ [ y·log σ(z) + (1-y)·log(1-σ(z)) ]
+//
+// Gradient (convex):
+//     ∂L/∂w = 1/n · Xᵀ(σ(Xw+b) - y)
+//     ∂L/∂b = 1/n · Σ (σ(z) - y)
+//
+// L2 regularization (ridge): add (λ/2)||w||² to loss; no regularization
+// on bias. Workhorse baseline — still competitive on tabular data.
+
 module ml.supervised.logistic_regression
 
-pub struct LogisticRegression {
-    params: map
-    fitted: bool
-    history: list
+pub struct Model { pub coef: [float], pub intercept: float }
+
+pub fn sigmoid(z: float) -> float {
+    if z >= 0.0 {
+        let ez = exp(-z)
+        return 1.0 / (1.0 + ez)
+    }
+    let ez = exp(z)
+    return ez / (1.0 + ez)
 }
 
-impl LogisticRegression {
-    pub fn new(params: map) -> LogisticRegression {
-        return LogisticRegression { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
+pub fn fit(x: [[float]], y: [float], lr: float, iters: int, l2: float) -> Model {
+    let n = x.len(); let p = x[0].len()
+    let mut w: [float] = []; let mut i = 0
+    while i < p { w.push(0.0); i += 1 }
+    let mut b = 0.0
+    let mut it = 0
+    while it < iters {
+        let mut gw: [float] = []; i = 0
+        while i < p { gw.push(0.0); i += 1 }
+        let mut gb = 0.0
+        let mut j = 0
+        while j < n {
+            let mut z = b; let mut k = 0
+            while k < p { z += w[k] * x[j][k]; k += 1 }
+            let yhat = sigmoid(z)
+            let err = yhat - y[j]
+            k = 0
+            while k < p { gw[k] += err * x[j][k]; k += 1 }
+            gb += err
+            j += 1
         }
-        return predictions
+        let inv_n = 1.0 / (n as float)
+        i = 0
+        while i < p { w[i] = w[i] - lr * (gw[i] * inv_n + l2 * w[i]); i += 1 }
+        b -= lr * gb * inv_n
+        it += 1
     }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
+    return Model { coef: w, intercept: b }
+}
+
+pub fn predict_proba(m: Model, x: [float]) -> float {
+    let mut z = m.intercept
+    let mut i = 0
+    while i < x.len() { z += m.coef[i] * x[i]; i += 1 }
+    return sigmoid(z)
+}
+
+pub fn predict(m: Model, x: [float], threshold: float) -> int {
+    return if predict_proba(m, x) >= threshold { 1 } else { 0 }
+}
+
+/// Mean cross-entropy loss.
+pub fn log_loss(m: Model, x: [[float]], y: [float]) -> float {
+    let n = x.len()
+    let eps = 1e-12
+    let mut s = 0.0
+    let mut i = 0
+    while i < n {
+        let p = predict_proba(m, x[i])
+        let pc = if p < eps { eps } else if p > 1.0 - eps { 1.0 - eps } else { p }
+        s += -(y[i] * ln(pc) + (1.0 - y[i]) * ln(1.0 - pc))
+        i += 1
     }
+    return s / (n as float)
+}
+
+fn exp(x: float) -> float {
+    let ln2 = 0.6931471805599453
+    let n = if x >= 0.0 { (x / ln2 + 0.5) as int } else { (x / ln2 - 0.5) as int }
+    let r = x - (n as float) * ln2
+    let mut t = 1.0; let mut s = 1.0; let mut k = 1
+    while k < 25 { t = t * r / (k as float); s += t; k += 1 }
+    let mag = if n < 0 { -n } else { n }
+    let mut p = 1.0; let mut i = 0
+    while i < mag { p = p * 2.0; i += 1 }
+    if n < 0 { p = 1.0 / p }
+    return s * p
+}
+fn ln(x: float) -> float {
+    let ln2 = 0.6931471805599453
+    let mut m = x; let mut k = 0.0
+    while m >= 2.0 { m = m / 2.0; k += 1.0 }
+    while m < 1.0  { m = m * 2.0; k -= 1.0 }
+    let u = (m - 1.0) / (m + 1.0); let u2 = u * u
+    let mut term = u; let mut sum = 0.0; let mut n = 1
+    while n < 30 { sum += term / (n as float); term = term * u2; n += 2 }
+    return k * ln2 + 2.0 * sum
 }
 
 fn main() {
-    let model = LogisticRegression .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Logistic Regression trained: " + model.score(X, y) as str)
+    // Linearly-separable toy set.
+    let x = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0],
+             [2.0, 2.0], [2.0, 3.0], [3.0, 2.0], [3.0, 3.0]]
+    let y = [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]
+    let m = fit(x, y, 0.5, 2000, 0.0)
+    println("loss: " + log_loss(m, x, y) as str)
+    println("P(x=(0,0))≈0: " + predict_proba(m, [0.0, 0.0]) as str)
+    println("P(x=(3,3))≈1: " + predict_proba(m, [3.0, 3.0]) as str)
 }
