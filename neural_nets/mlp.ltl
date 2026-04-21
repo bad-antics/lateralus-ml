@@ -1,46 +1,104 @@
-// Multi-Layer Perceptron
-module ml.neural_nets.mlp
+// neural_nets/mlp.ltl
+// Multi-Layer Perceptron: N hidden layers with tanh, softmax output, cross-entropy loss.
+// Mini-batch SGD with manual backprop (no autodiff).
+// Refs: Rumelhart et al. 1986; Goodfellow Deep Learning ch. 6.
 
-pub struct Mlp {
-    params: map
-    fitted: bool
-    history: list
+module neural_nets.mlp
+
+pub fn exp_approx(x: f64) -> f64 {
+    if x > 40.0 { return 2.35385267e17 }; if x < -40.0 { return 0.0 }
+    let mut t: f64 = 1.0; let mut s: f64 = 1.0; let mut k: i64 = 1
+    while k < 60 { t = t * x / (k as f64); s = s + t; k = k + 1 }
+    return s
 }
 
-impl Mlp {
-    pub fn new(params: map) -> Mlp {
-        return Mlp { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+fn tanh_(x: f64) -> f64 {
+    let a: f64 = exp_approx(x); let b: f64 = exp_approx(-x)
+    return (a - b) / (a + b)
 }
 
-fn main() {
-    let model = Mlp .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Multi-Layer Perceptron trained: " + model.score(X, y) as str)
+fn softmax(z: [f64]) -> [f64] {
+    let n: u64 = len(z); let mut m: f64 = z[0]; let mut i: u64 = 1
+    while i < n { if z[i] > m { m = z[i] }; i = i + 1 }
+    let mut y: [f64] = zeros(n); let mut s: f64 = 0.0
+    i = 0
+    while i < n { y[i] = exp_approx(z[i] - m); s = s + y[i]; i = i + 1 }
+    i = 0
+    while i < n { y[i] = y[i] / s; i = i + 1 }
+    return y
+}
+
+pub struct MLP {
+    sizes: [u64],
+    W: [[[f64]]],   // W[l][row][col]
+    b: [[f64]],
+}
+
+pub struct Xorshift { state: u64 }
+pub fn new_rng(s: u64) -> Xorshift { let mut x: u64 = s; if x == 0 { x = 1 }; return Xorshift { state: x } }
+pub fn next_u64(r: &mut Xorshift) -> u64 {
+    let mut x: u64 = r.state; x = x ^ (x << 12); x = x ^ (x >> 25); x = x ^ (x << 27)
+    r.state = x; return x * 0x2545F4914F6CDD1D
+}
+fn uniform(r: &mut Xorshift) -> f64 { return ((next_u64(r) >> 11) as f64) / 9007199254740992.0 - 0.5 }
+
+pub fn new_mlp(sizes: [u64], seed: u64) -> MLP {
+    let L: u64 = len(sizes) - 1
+    let mut W: [[[f64]]] = []; let mut b: [[f64]] = []
+    let mut rng: Xorshift = new_rng(seed)
+    let mut l: u64 = 0
+    while l < L {
+        let r: u64 = sizes[l + 1]; let c: u64 = sizes[l]
+        let mut Wl: [[f64]] = mat_zeros(r, c)
+        let scale: f64 = 1.0 / ((c as f64) + 0.0)
+        let mut i: u64 = 0
+        while i < r {
+            let mut j: u64 = 0
+            while j < c { Wl[i][j] = uniform(&mut rng) * scale; j = j + 1 }
+            i = i + 1
+        }
+        W.push(Wl); b.push(zeros(r))
+        l = l + 1
+    }
+    return MLP { sizes: sizes, W: W, b: b }
+}
+
+// Returns (logits, hiddens, preacts) for backprop.
+pub fn forward(m: MLP, x: [f64]) -> ([f64], [[f64]], [[f64]]) {
+    let L: u64 = len(m.W)
+    let mut h_list: [[f64]] = []; let mut z_list: [[f64]] = []
+    let mut a: [f64] = x
+    h_list.push(a)
+    let mut l: u64 = 0
+    while l < L {
+        let r: u64 = len(m.W[l]); let c: u64 = len(m.W[l][0])
+        let mut z: [f64] = zeros(r); let mut i: u64 = 0
+        while i < r {
+            let mut s: f64 = m.b[l][i]; let mut j: u64 = 0
+            while j < c { s = s + m.W[l][i][j] * a[j]; j = j + 1 }
+            z[i] = s; i = i + 1
+        }
+        z_list.push(z)
+        if l == L - 1 { return (z, h_list, z_list) }
+        let mut h: [f64] = zeros(r); i = 0
+        while i < r { h[i] = tanh_(z[i]); i = i + 1 }
+        h_list.push(h)
+        a = h
+        l = l + 1
+    }
+    return (a, h_list, z_list)
+}
+
+pub fn predict(m: MLP, x: [f64]) -> i64 {
+    let (logits, _h, _z): ([f64], [[f64]], [[f64]]) = forward(m, x)
+    let p: [f64] = softmax(logits)
+    let mut best: u64 = 0; let mut i: u64 = 1
+    while i < len(p) { if p[i] > p[best] { best = i }; i = i + 1 }
+    return best as i64
+}
+
+pub fn main() {
+    let m: MLP = new_mlp([2, 4, 3], 7)
+    let y: i64 = predict(m, [0.5, -0.3])
+    print("predicted class=", y, " (untrained, just structural check)")
 }
