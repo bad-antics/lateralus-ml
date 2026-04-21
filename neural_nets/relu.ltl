@@ -1,46 +1,74 @@
-// ReLU Activation
-module ml.neural_nets.relu
+// neural_nets/relu.ltl
+// ReLU family activations: ReLU, LeakyReLU, ELU, GELU (tanh approx).
+// ReLU(x) = max(0,x); derivative 1 if x>0 else 0.
+// LeakyReLU(x) = x if x>=0 else alpha*x.
+// ELU(x) = x if x>=0 else alpha*(e^x - 1).
+// GELU(x) ~ 0.5 x (1 + tanh( sqrt(2/pi) (x + 0.044715 x^3) )).
+// Refs: Nair & Hinton 2010; Maas 2013; Clevert 2015; Hendrycks & Gimpel 2016.
 
-pub struct Relu {
-    params: map
-    fitted: bool
-    history: list
+module neural_nets.relu
+
+pub fn exp_approx(x: f64) -> f64 {
+    if x > 40.0 { return 2.35385267e17 }
+    if x < -40.0 { return 0.0 }
+    let mut term: f64 = 1.0
+    let mut sum:  f64 = 1.0
+    let mut k: i64 = 1
+    while k < 60 {
+        term = term * x / (k as f64)
+        sum  = sum + term
+        k = k + 1
+    }
+    return sum
 }
 
-impl Relu {
-    pub fn new(params: map) -> Relu {
-        return Relu { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+pub fn tanh_approx(x: f64) -> f64 {
+    let e1: f64 = exp_approx(x)
+    let e2: f64 = exp_approx(-x)
+    return (e1 - e2) / (e1 + e2)
 }
 
-fn main() {
-    let model = Relu .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("ReLU Activation trained: " + model.score(X, y) as str)
+pub fn relu(x: f64) -> f64 { if x > 0.0 { return x } return 0.0 }
+
+pub fn relu_grad(x: f64) -> f64 { if x > 0.0 { return 1.0 } return 0.0 }
+
+pub fn leaky_relu(x: f64, alpha: f64) -> f64 {
+    if x >= 0.0 { return x }
+    return alpha * x
+}
+
+pub fn leaky_relu_grad(x: f64, alpha: f64) -> f64 {
+    if x >= 0.0 { return 1.0 }
+    return alpha
+}
+
+pub fn elu(x: f64, alpha: f64) -> f64 {
+    if x >= 0.0 { return x }
+    return alpha * (exp_approx(x) - 1.0)
+}
+
+pub fn elu_grad(x: f64, alpha: f64) -> f64 {
+    if x >= 0.0 { return 1.0 }
+    return alpha * exp_approx(x)
+}
+
+pub fn gelu(x: f64) -> f64 {
+    let c: f64 = 0.7978845608028654     // sqrt(2/pi)
+    let k: f64 = 0.044715
+    let u: f64 = c * (x + k * x * x * x)
+    return 0.5 * x * (1.0 + tanh_approx(u))
+}
+
+pub fn apply_relu(x: [f64]) -> [f64] {
+    let n: u64 = len(x)
+    let mut y: [f64] = zeros(n)
+    let mut i: u64 = 0
+    while i < n { y[i] = relu(x[i]); i = i + 1 }
+    return y
+}
+
+pub fn main() {
+    print("relu(-1)=", relu(-1.0), " relu(2.3)=", relu(2.3))
+    print("leaky(-1, 0.01)=", leaky_relu(-1.0, 0.01))
+    print("elu(-1, 1.0)=", elu(-1.0, 1.0), " gelu(0)=", gelu(0.0), " gelu(1)=", gelu(1.0))
 }
