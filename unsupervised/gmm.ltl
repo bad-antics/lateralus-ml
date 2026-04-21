@@ -1,46 +1,167 @@
-// Gaussian Mixture Model
+// Gaussian Mixture Model via Expectation-Maximization (Dempster 1977).
+//
+//   p(x) = Σ_{k=1}^{K} π_k · N(x | μ_k, Σ_k)
+//
+// EM iteration (diagonal-covariance version here for simplicity):
+//   E-step:  γ_{i,k} = π_k · N(x_i | μ_k, σ²_k) / p(x_i)
+//   M-step:  N_k  = Σ_i γ_{i,k}
+//            π_k  = N_k / n
+//            μ_k  = (1/N_k) · Σ_i γ_{i,k}·x_i
+//            σ²_k = (1/N_k) · Σ_i γ_{i,k}·(x_i − μ_k)²     (per-dim)
+//
+// Log-likelihood monotonically increases; stop when Δ log-lik < tol.
+// Soft clustering (γ = posterior responsibilities) contrasts with
+// k-means' hard assignment. Full-covariance variant requires matrix
+// inverses and determinants.
+
 module ml.unsupervised.gmm
 
-pub struct Gmm {
-    params: map
-    fitted: bool
-    history: list
+pub struct Model {
+    pub pi: [float],                   // mixing weights, len K
+    pub mu: [[float]],                 // K × d
+    pub var: [[float]],                // K × d (diagonal covariance)
 }
 
-impl Gmm {
-    pub fn new(params: map) -> Gmm {
-        return Gmm { params: params, fitted: false, history: [] }
+struct Rng { state: u64 }
+fn rng_new(seed: u64) -> Rng { return Rng { state: if seed == 0 { 0xBADC0FFEu64 } else { seed } } }
+fn rng_next(r: &mut Rng) -> u64 { let mut s = r.state; s ^= s >> 12; s ^= s << 25; s ^= s >> 27; r.state = s; return s * 2685821657736338717u64 }
+fn rng_range(r: &mut Rng, n: int) -> int { return (rng_next(r) as int % n + n) % n }
+
+fn exp(x: float) -> float {
+    if x < -700.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    let n = if x >= 0.0 { (x / ln2 + 0.5) as int } else { (x / ln2 - 0.5) as int }
+    let r = x - (n as float) * ln2
+    let mut t = 1.0; let mut s = 1.0; let mut k = 1
+    while k < 25 { t = t * r / (k as float); s += t; k += 1 }
+    let mag = if n < 0 { -n } else { n }
+    let mut p = 1.0; let mut i = 0
+    while i < mag { p = p * 2.0; i += 1 }
+    if n < 0 { p = 1.0 / p }
+    return s * p
+}
+fn ln(x: float) -> float {
+    let ln2 = 0.6931471805599453; let mut m = x; let mut k = 0.0
+    while m >= 2.0 { m = m / 2.0; k += 1.0 }
+    while m < 1.0  { m = m * 2.0; k -= 1.0 }
+    let u = (m - 1.0) / (m + 1.0); let u2 = u * u
+    let mut term = u; let mut sum = 0.0; let mut n = 1
+    while n < 30 { sum += term / (n as float); term = term * u2; n += 2 }
+    return k * ln2 + 2.0 * sum
+}
+
+fn gaussian_diag(x: [float], mu: [float], var: [float]) -> float {
+    let two_pi = 6.283185307179586
+    let d = x.len()
+    let mut log_det = 0.0; let mut quad = 0.0
+    let mut i = 0
+    while i < d {
+        log_det += ln(var[i])
+        let diff = x[i] - mu[i]
+        quad += diff * diff / var[i]
+        i += 1
     }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
+    let log_norm = -0.5 * ((d as float) * ln(two_pi) + log_det + quad)
+    return exp(log_norm)
+}
+
+pub fn fit(x: [[float]], k: int, max_iters: int, tol: float, seed: u64) -> Model {
+    let n = x.len(); let d = x[0].len()
+    let mut rng = rng_new(seed)
+    // Initialize: random data points as means, unit variance, uniform π.
+    let mut pi: [float] = []; let mut mu: [[float]] = []; let mut var: [[float]] = []
+    let mut c = 0
+    while c < k {
+        pi.push(1.0 / (k as float))
+        mu.push(x[rng_range(&mut rng, n)].clone())
+        let mut v: [float] = []
+        let mut q = 0
+        while q < d { v.push(1.0); q += 1 }
+        var.push(v)
+        c += 1
     }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
+    let mut prev_ll = -1e300
+    let mut it = 0
+    while it < max_iters {
+        // E-step
+        let mut gamma: [[float]] = []
+        let mut log_lik = 0.0
         let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
+        while i < n {
+            let mut row: [float] = []
+            let mut total = 0.0
+            let mut cc = 0
+            while cc < k {
+                let p = pi[cc] * gaussian_diag(x[i], mu[cc], var[cc])
+                row.push(p); total += p
+                cc += 1
+            }
+            if total > 0.0 {
+                log_lik += ln(total)
+                cc = 0
+                while cc < k { row[cc] = row[cc] / total; cc += 1 }
+            }
+            gamma.push(row)
             i += 1
         }
-        return correct as float / len(y) as float
+        // M-step
+        let mut cc = 0
+        while cc < k {
+            let mut Nk = 0.0
+            i = 0
+            while i < n { Nk += gamma[i][cc]; i += 1 }
+            pi[cc] = Nk / (n as float)
+            let mut new_mu: [float] = []
+            let mut q = 0
+            while q < d { new_mu.push(0.0); q += 1 }
+            i = 0
+            while i < n {
+                q = 0
+                while q < d { new_mu[q] += gamma[i][cc] * x[i][q]; q += 1 }
+                i += 1
+            }
+            q = 0
+            while q < d { new_mu[q] = new_mu[q] / Nk; q += 1 }
+            let mut new_var: [float] = []
+            q = 0
+            while q < d { new_var.push(0.0); q += 1 }
+            i = 0
+            while i < n {
+                q = 0
+                while q < d { let dd = x[i][q] - new_mu[q]; new_var[q] += gamma[i][cc] * dd * dd; q += 1 }
+                i += 1
+            }
+            q = 0
+            while q < d { new_var[q] = new_var[q] / Nk + 1e-6; q += 1 }
+            mu[cc] = new_mu; var[cc] = new_var
+            cc += 1
+        }
+        if abs_f(log_lik - prev_ll) < tol { break }
+        prev_ll = log_lik
+        it += 1
     }
+    return Model { pi: pi, mu: mu, var: var }
 }
 
+pub fn predict(m: Model, x: [float]) -> int {
+    let k = m.pi.len()
+    let mut best = 0; let mut best_p = m.pi[0] * gaussian_diag(x, m.mu[0], m.var[0])
+    let mut c = 1
+    while c < k {
+        let p = m.pi[c] * gaussian_diag(x, m.mu[c], m.var[c])
+        if p > best_p { best_p = p; best = c }
+        c += 1
+    }
+    return best
+}
+
+fn abs_f(x: float) -> float { return if x < 0.0 { -x } else { x } }
+
 fn main() {
-    let model = Gmm .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Gaussian Mixture Model trained: " + model.score(X, y) as str)
+    let x = [[0.0, 0.0], [0.1, -0.1], [-0.1, 0.1], [0.2, 0.0],
+             [10.0, 10.0], [10.1, 9.9], [9.9, 10.1], [10.0, 10.2]]
+    let m = fit(x, 2, 100, 1e-4, 3u64)
+    println("π = [" + m.pi[0] as str + ", " + m.pi[1] as str + "]")
+    println("pred(0.05, 0.05): " + predict(m, [0.05, 0.05]) as str)
+    println("pred(10.0, 10.0): " + predict(m, [10.0, 10.0]) as str)
 }
