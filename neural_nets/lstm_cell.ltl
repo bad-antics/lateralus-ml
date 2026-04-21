@@ -1,46 +1,94 @@
-// LSTM Cell
-module ml.neural_nets.lstm_cell
+// neural_nets/lstm_cell.ltl
+// LSTM cell (Hochreiter & Schmidhuber 1997; Gers 1999 forget-gate variant).
+// i_t = sigma(W_i [x; h_{t-1}] + b_i)   input gate
+// f_t = sigma(W_f [x; h_{t-1}] + b_f)   forget gate
+// o_t = sigma(W_o [x; h_{t-1}] + b_o)   output gate
+// g_t = tanh (W_g [x; h_{t-1}] + b_g)   candidate
+// c_t = f_t * c_{t-1} + i_t * g_t
+// h_t = o_t * tanh(c_t)
 
-pub struct LstmCell {
-    params: map
-    fitted: bool
-    history: list
+module neural_nets.lstm_cell
+
+pub fn exp_approx(x: f64) -> f64 {
+    if x > 40.0 { return 2.35385267e17 }; if x < -40.0 { return 0.0 }
+    let mut t: f64 = 1.0; let mut s: f64 = 1.0; let mut k: i64 = 1
+    while k < 60 { t = t * x / (k as f64); s = s + t; k = k + 1 }
+    return s
+}
+fn sigmoid(x: f64) -> f64 { return 1.0 / (1.0 + exp_approx(-x)) }
+fn tanh_(x: f64) -> f64 { let a: f64 = exp_approx(x); let b: f64 = exp_approx(-x); return (a-b)/(a+b) }
+
+pub struct LSTMCell {
+    in_dim: u64, hid: u64,
+    Wi: [[f64]], Wf: [[f64]], Wo: [[f64]], Wg: [[f64]],  // each: hid x (in+hid)
+    bi: [f64],  bf: [f64],  bo: [f64],  bg: [f64],
 }
 
-impl LstmCell {
-    pub fn new(params: map) -> LstmCell {
-        return LstmCell { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
+pub fn new_lstm(in_dim: u64, hid: u64) -> LSTMCell {
+    let cols: u64 = in_dim + hid
+    let scale: f64 = 0.1
+    let mut Wi: [[f64]] = mat_zeros(hid, cols)
+    let mut Wf: [[f64]] = mat_zeros(hid, cols)
+    let mut Wo: [[f64]] = mat_zeros(hid, cols)
+    let mut Wg: [[f64]] = mat_zeros(hid, cols)
+    let mut i: u64 = 0
+    while i < hid {
+        let mut j: u64 = 0
+        while j < cols {
+            let v: f64 = scale * (((i + j) % 7) as f64 - 3.0)
+            Wi[i][j] = v; Wf[i][j] = v + 0.05; Wo[i][j] = v - 0.05; Wg[i][j] = v * 0.5
+            j = j + 1
         }
-        return predictions
+        i = i + 1
     }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+    // forget-gate bias init = 1 (Jozefowicz 2015).
+    let mut bf: [f64] = zeros(hid); i = 0
+    while i < hid { bf[i] = 1.0; i = i + 1 }
+    return LSTMCell { in_dim: in_dim, hid: hid,
+                      Wi: Wi, Wf: Wf, Wo: Wo, Wg: Wg,
+                      bi: zeros(hid), bf: bf, bo: zeros(hid), bg: zeros(hid) }
 }
 
-fn main() {
-    let model = LstmCell .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("LSTM Cell trained: " + model.score(X, y) as str)
+fn concat(x: [f64], h: [f64]) -> [f64] {
+    let a: u64 = len(x); let b: u64 = len(h)
+    let mut r: [f64] = zeros(a + b); let mut i: u64 = 0
+    while i < a { r[i] = x[i]; i = i + 1 }
+    i = 0
+    while i < b { r[a + i] = h[i]; i = i + 1 }
+    return r
+}
+fn matvec_plus(M: [[f64]], v: [f64], b: [f64]) -> [f64] {
+    let r: u64 = len(M); let c: u64 = len(v); let mut y: [f64] = zeros(r)
+    let mut i: u64 = 0
+    while i < r { let mut s: f64 = b[i]; let mut j: u64 = 0
+        while j < c { s = s + M[i][j] * v[j]; j = j + 1 }
+        y[i] = s; i = i + 1 }
+    return y
+}
+
+pub fn step(c: LSTMCell, x: [f64], h_prev: [f64], c_prev: [f64]) -> ([f64], [f64]) {
+    let z: [f64] = concat(x, h_prev)
+    let ai: [f64] = matvec_plus(c.Wi, z, c.bi)
+    let af: [f64] = matvec_plus(c.Wf, z, c.bf)
+    let ao: [f64] = matvec_plus(c.Wo, z, c.bo)
+    let ag: [f64] = matvec_plus(c.Wg, z, c.bg)
+    let H: u64 = c.hid
+    let mut c_new: [f64] = zeros(H); let mut h_new: [f64] = zeros(H)
+    let mut i: u64 = 0
+    while i < H {
+        let it: f64 = sigmoid(ai[i]); let ft: f64 = sigmoid(af[i])
+        let ot: f64 = sigmoid(ao[i]); let gt: f64 = tanh_(ag[i])
+        c_new[i] = ft * c_prev[i] + it * gt
+        h_new[i] = ot * tanh_(c_new[i])
+        i = i + 1
+    }
+    return (h_new, c_new)
+}
+
+pub fn main() {
+    let cell: LSTMCell = new_lstm(2, 3)
+    let h0: [f64] = zeros(3); let c0: [f64] = zeros(3)
+    let (h1, c1): ([f64], [f64]) = step(cell, [0.5, -0.2], h0, c0)
+    let (h2, c2): ([f64], [f64]) = step(cell, [0.1,  0.3], h1, c1)
+    print("h2=", h2, " c2=", c2)
 }
