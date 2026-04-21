@@ -1,46 +1,125 @@
-// k-Nearest Neighbors
+// k-Nearest Neighbors — lazy, non-parametric instance-based learner.
+//
+//   Classification:  majority vote among k nearest training points
+//   Regression:      mean (or distance-weighted mean) of k nearest targets
+//
+// Distance metrics supported:
+//   • Euclidean (L2)       √Σ(a_i − b_i)²
+//   • Manhattan (L1)       Σ|a_i − b_i|
+//   • Minkowski-p          (Σ|a_i − b_i|^p)^(1/p)
+//
+// Training is O(1); prediction is O(N·d). Choose k by cross-validation;
+// small k → high variance, large k → high bias. For production use
+// ball-tree or KD-tree for sub-linear queries.
+
 module ml.supervised.knn
 
-pub struct Knn {
-    params: map
-    fitted: bool
-    history: list
+pub fn euclidean(a: [float], b: [float]) -> float {
+    let mut s = 0.0
+    let mut i = 0
+    while i < a.len() { let d = a[i] - b[i]; s += d * d; i += 1 }
+    return sqrt(s)
 }
 
-impl Knn {
-    pub fn new(params: map) -> Knn {
-        return Knn { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+pub fn manhattan(a: [float], b: [float]) -> float {
+    let mut s = 0.0
+    let mut i = 0
+    while i < a.len() { s += abs_f(a[i] - b[i]); i += 1 }
+    return s
 }
+
+pub fn minkowski(a: [float], b: [float], p: float) -> float {
+    let mut s = 0.0
+    let mut i = 0
+    while i < a.len() { s += pow(abs_f(a[i] - b[i]), p); i += 1 }
+    return pow(s, 1.0 / p)
+}
+
+/// Return indices and distances of the k nearest neighbors.
+pub fn knn_indices(x_train: [[float]], query: [float], k: int) -> ([int], [float]) {
+    let n = x_train.len()
+    // Compute all distances; partial sort via selection.
+    let mut dists: [float] = []
+    let mut idx: [int] = []
+    let mut i = 0
+    while i < n {
+        dists.push(euclidean(x_train[i], query))
+        idx.push(i)
+        i += 1
+    }
+    // Partial selection sort (stable): pick k smallest
+    let kk = if k < n { k } else { n }
+    let mut s = 0
+    while s < kk {
+        let mut min_i = s
+        let mut j = s + 1
+        while j < n {
+            if dists[j] < dists[min_i] { min_i = j }
+            j += 1
+        }
+        if min_i != s {
+            let td = dists[s]; dists[s] = dists[min_i]; dists[min_i] = td
+            let ti = idx[s]; idx[s] = idx[min_i]; idx[min_i] = ti
+        }
+        s += 1
+    }
+    let mut out_i: [int] = []
+    let mut out_d: [float] = []
+    i = 0
+    while i < kk { out_i.push(idx[i]); out_d.push(dists[i]); i += 1 }
+    return (out_i, out_d)
+}
+
+/// Majority-vote classification; y_train are integer labels.
+pub fn predict_classify(x_train: [[float]], y_train: [int],
+                        query: [float], k: int) -> int {
+    let (idx, _) = knn_indices(x_train, query, k)
+    // Vote via linear scan (assumes small label space).
+    let mut labels: [int] = []
+    let mut counts: [int] = []
+    let mut i = 0
+    while i < idx.len() {
+        let lab = y_train[idx[i]]
+        let mut j = 0
+        let mut found = false
+        while j < labels.len() {
+            if labels[j] == lab { counts[j] += 1; found = true; break }
+            j += 1
+        }
+        if !found { labels.push(lab); counts.push(1) }
+        i += 1
+    }
+    let mut best = 0
+    let mut j = 1
+    while j < counts.len() { if counts[j] > counts[best] { best = j }; j += 1 }
+    return labels[best]
+}
+
+/// Regression via distance-weighted average (weight = 1 / (dist + ε)).
+pub fn predict_regress(x_train: [[float]], y_train: [float],
+                       query: [float], k: int) -> float {
+    let (idx, dists) = knn_indices(x_train, query, k)
+    let eps = 1e-12
+    let mut num = 0.0; let mut den = 0.0
+    let mut i = 0
+    while i < idx.len() {
+        let w = 1.0 / (dists[i] + eps)
+        num += w * y_train[idx[i]]
+        den += w
+        i += 1
+    }
+    return num / den
+}
+
+fn abs_f(x: float) -> float { return if x < 0.0 { -x } else { x } }
+fn sqrt(x: float) -> float { if x <= 0.0 { return 0.0 }; let mut g = x; let mut i = 0; while i < 40 { g = 0.5 * (g + x / g); i += 1 }; return g }
+fn ln(x: float) -> float { let ln2 = 0.6931471805599453; let mut m = x; let mut k = 0.0; while m >= 2.0 { m = m / 2.0; k += 1.0 }; while m < 1.0 { m = m * 2.0; k -= 1.0 }; let u = (m - 1.0) / (m + 1.0); let u2 = u * u; let mut term = u; let mut sum = 0.0; let mut n = 1; while n < 30 { sum += term / (n as float); term = term * u2; n += 2 }; return k * ln2 + 2.0 * sum }
+fn exp(x: float) -> float { let ln2 = 0.6931471805599453; let n = if x >= 0.0 { (x / ln2 + 0.5) as int } else { (x / ln2 - 0.5) as int }; let r = x - (n as float) * ln2; let mut t = 1.0; let mut s = 1.0; let mut k = 1; while k < 25 { t = t * r / (k as float); s += t; k += 1 }; let mag = if n < 0 { -n } else { n }; let mut p = 1.0; let mut i = 0; while i < mag { p = p * 2.0; i += 1 }; if n < 0 { p = 1.0 / p }; return s * p }
+fn pow(x: float, y: float) -> float { if x == 0.0 { return 0.0 }; return exp(y * ln(x)) }
 
 fn main() {
-    let model = Knn .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("k-Nearest Neighbors trained: " + model.score(X, y) as str)
+    let xt = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [4.0, 4.0], [4.0, 5.0], [5.0, 4.0]]
+    let yt = [0, 0, 0, 1, 1, 1]
+    println("Pred (0.5, 0.5) k=3: " + predict_classify(xt, yt, [0.5, 0.5], 3) as str)   // 0
+    println("Pred (4.5, 4.5) k=3: " + predict_classify(xt, yt, [4.5, 4.5], 3) as str)   // 1
 }
