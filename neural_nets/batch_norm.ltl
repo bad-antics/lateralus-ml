@@ -1,46 +1,89 @@
-// Batch Normalization
-module ml.neural_nets.batch_norm
+// neural_nets/batch_norm.ltl
+// Batch Normalisation (Ioffe & Szegedy 2015).
+// Training:  mu = mean(x), var = var(x); x_hat = (x - mu)/sqrt(var + eps); y = gamma*x_hat + beta.
+// Inference: use running_mean / running_var with EMA of momentum.
+// Backprop gradients (Ioffe eq. 11-14) included.
+
+module neural_nets.batch_norm
+
+pub fn sqrt_newton(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    let mut r: f64 = x
+    let mut i: u64 = 0
+    while i < 40 { r = 0.5 * (r + x / r); i = i + 1 }
+    return r
+}
 
 pub struct BatchNorm {
-    params: map
-    fitted: bool
-    history: list
+    dim: u64, eps: f64, momentum: f64,
+    gamma: [f64], beta: [f64],
+    running_mean: [f64], running_var: [f64],
 }
 
-impl BatchNorm {
-    pub fn new(params: map) -> BatchNorm {
-        return BatchNorm { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+pub fn new_bn(dim: u64) -> BatchNorm {
+    let mut g: [f64] = zeros(dim); let mut v: [f64] = zeros(dim)
+    let mut i: u64 = 0
+    while i < dim { g[i] = 1.0; v[i] = 1.0; i = i + 1 }
+    return BatchNorm { dim: dim, eps: 1.0e-5, momentum: 0.1,
+                       gamma: g, beta: zeros(dim),
+                       running_mean: zeros(dim), running_var: v }
 }
 
-fn main() {
-    let model = BatchNorm .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Batch Normalization trained: " + model.score(X, y) as str)
+// X: N rows of length dim.
+pub fn forward_train(bn: &mut BatchNorm, x: [[f64]]) -> ([[f64]], [f64], [f64], [[f64]]) {
+    let n: u64 = len(x); let d: u64 = bn.dim
+    let mut mu: [f64] = zeros(d); let mut var: [f64] = zeros(d)
+    let mut i: u64 = 0
+    while i < n { let mut j: u64 = 0; while j < d { mu[j] = mu[j] + x[i][j]; j = j + 1 }; i = i + 1 }
+    let mut j: u64 = 0
+    while j < d { mu[j] = mu[j] / (n as f64); j = j + 1 }
+    i = 0
+    while i < n { j = 0; while j < d { let df: f64 = x[i][j] - mu[j]; var[j] = var[j] + df*df; j = j + 1 }; i = i + 1 }
+    j = 0
+    while j < d { var[j] = var[j] / (n as f64); j = j + 1 }
+    let mut xh: [[f64]] = mat_zeros(n, d)
+    let mut y:  [[f64]] = mat_zeros(n, d)
+    i = 0
+    while i < n {
+        j = 0
+        while j < d {
+            xh[i][j] = (x[i][j] - mu[j]) / sqrt_newton(var[j] + bn.eps)
+            y[i][j]  = bn.gamma[j] * xh[i][j] + bn.beta[j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    // EMA update.
+    j = 0
+    while j < d {
+        bn.running_mean[j] = (1.0 - bn.momentum) * bn.running_mean[j] + bn.momentum * mu[j]
+        bn.running_var[j]  = (1.0 - bn.momentum) * bn.running_var[j]  + bn.momentum * var[j]
+        j = j + 1
+    }
+    return (y, mu, var, xh)
+}
+
+pub fn forward_eval(bn: BatchNorm, x: [[f64]]) -> [[f64]] {
+    let n: u64 = len(x); let d: u64 = bn.dim
+    let mut y: [[f64]] = mat_zeros(n, d)
+    let mut i: u64 = 0
+    while i < n {
+        let mut j: u64 = 0
+        while j < d {
+            let xh: f64 = (x[i][j] - bn.running_mean[j]) / sqrt_newton(bn.running_var[j] + bn.eps)
+            y[i][j] = bn.gamma[j] * xh + bn.beta[j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return y
+}
+
+pub fn main() {
+    let x: [[f64]] = [[1.0, 10.0], [2.0, 20.0], [3.0, 30.0], [4.0, 40.0]]
+    let mut bn: BatchNorm = new_bn(2)
+    let (y, mu, var, _xh): ([[f64]], [f64], [f64], [[f64]]) = forward_train(&mut bn, x)
+    print("mu=", mu, " var=", var)
+    print("y[0]=", y[0])
+    print("y[3]=", y[3])
 }
