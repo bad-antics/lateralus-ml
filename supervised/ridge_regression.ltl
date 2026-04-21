@@ -1,46 +1,117 @@
-// Ridge Regression
+// Ridge regression — L2-regularized linear regression (Tikhonov 1943).
+//
+//     L(β) = ||y − Xβ||² + λ·||β||²
+//     β̂   = (XᵀX + λI)⁻¹ Xᵀy
+//
+// • Shrinks coefficients toward zero (never exactly to zero — for
+//   sparse solutions use LASSO)
+// • Makes XᵀX well-conditioned even when features are collinear
+// • λ chosen by cross-validation; as λ → 0 recovers OLS, λ → ∞ shrinks
+//   all coefficients to 0
+//
+// The intercept is typically NOT regularized; features should be
+// standardized before fitting so the L2 penalty is scale-invariant.
+
 module ml.supervised.ridge_regression
 
-pub struct RidgeRegression {
-    params: map
-    fitted: bool
-    history: list
+pub struct Model { pub coef: [float], pub intercept: float }
+
+/// Fit with closed-form normal equations. `lambda` multiplies I.
+pub fn fit(x: [[float]], y: [float], lambda: float) -> Model {
+    let n = x.len(); let p = x[0].len()
+    // Center y and each column of X so intercept is just mean(y) - w·mean(x).
+    let mut my = 0.0
+    let mut i = 0
+    while i < n { my += y[i]; i += 1 }
+    my = my / (n as float)
+    let mut mx: [float] = []
+    let mut j = 0
+    while j < p {
+        let mut s = 0.0; i = 0
+        while i < n { s += x[i][j]; i += 1 }
+        mx.push(s / (n as float))
+        j += 1
+    }
+    // Build XᵀX + λI on centered X, and Xᵀy_centered.
+    let mut a: [[float]] = []
+    j = 0
+    while j < p {
+        let mut row: [float] = []
+        let mut k = 0
+        while k < p {
+            let mut s = 0.0; i = 0
+            while i < n { s += (x[i][j] - mx[j]) * (x[i][k] - mx[k]); i += 1 }
+            if j == k { s += lambda }
+            row.push(s); k += 1
+        }
+        a.push(row); j += 1
+    }
+    let mut b: [float] = []
+    j = 0
+    while j < p {
+        let mut s = 0.0; i = 0
+        while i < n { s += (x[i][j] - mx[j]) * (y[i] - my); i += 1 }
+        b.push(s); j += 1
+    }
+    let w = solve_lu(a, b)
+    // Intercept = my - Σ w_j · mx_j
+    let mut intercept = my
+    j = 0
+    while j < p { intercept -= w[j] * mx[j]; j += 1 }
+    return Model { coef: w, intercept: intercept }
 }
 
-impl RidgeRegression {
-    pub fn new(params: map) -> RidgeRegression {
-        return RidgeRegression { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+pub fn predict(m: Model, x: [float]) -> float {
+    let mut s = m.intercept
+    let mut i = 0
+    while i < x.len() { s += m.coef[i] * x[i]; i += 1 }
+    return s
 }
+
+fn solve_lu(a: [[float]], b: [float]) -> [float] {
+    let n = b.len()
+    let mut m: [[float]] = []; let mut bb: [float] = []
+    let mut i = 0
+    while i < n { m.push(a[i].clone()); bb.push(b[i]); i += 1 }
+    let mut k = 0
+    while k < n {
+        let mut best = k; let mut bv = abs_f(m[k][k])
+        let mut r = k + 1
+        while r < n { if abs_f(m[r][k]) > bv { bv = abs_f(m[r][k]); best = r }; r += 1 }
+        if best != k {
+            let tmp = m[k]; m[k] = m[best]; m[best] = tmp
+            let t2 = bb[k]; bb[k] = bb[best]; bb[best] = t2
+        }
+        let mut i2 = k + 1
+        while i2 < n {
+            let f = m[i2][k] / m[k][k]
+            let mut j = k
+            while j < n { m[i2][j] = m[i2][j] - f * m[k][j]; j += 1 }
+            bb[i2] = bb[i2] - f * bb[k]
+            i2 += 1
+        }
+        k += 1
+    }
+    let mut x: [float] = []; let mut i3 = 0
+    while i3 < n { x.push(0.0); i3 += 1 }
+    let mut ii = n - 1
+    while ii >= 0 {
+        let mut s = bb[ii]; let mut j = ii + 1
+        while j < n { s -= m[ii][j] * x[j]; j += 1 }
+        x[ii] = s / m[ii][ii]
+        if ii == 0 { break }
+        ii -= 1
+    }
+    return x
+}
+fn abs_f(x: float) -> float { return if x < 0.0 { -x } else { x } }
 
 fn main() {
-    let model = RidgeRegression .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Ridge Regression trained: " + model.score(X, y) as str)
+    // Collinear x2 = 2·x1 plus noise; ridge prevents blowing up.
+    let x = [[1.0, 2.01], [2.0, 4.02], [3.0, 5.99], [4.0, 7.98], [5.0, 10.0]]
+    let y = [ 3.0,  6.0,  9.0, 12.0, 15.0]
+    let m0 = fit(x, y, 0.01)
+    let m1 = fit(x, y, 1.0)
+    println("λ=0.01: coef=[" + m0.coef[0] as str + ", " + m0.coef[1] as str + "]")
+    println("λ=1.0:  coef=[" + m1.coef[0] as str + ", " + m1.coef[1] as str + "]  (shrunk)")
 }
