@@ -1,46 +1,67 @@
-// Min-Max Normalizer
+// Sample-wise normalization — rescale each row independently to a
+// specified unit norm.
+//
+//   L1:  x' = x / Σ|x_i|              (sums to 1 in magnitude)
+//   L2:  x' = x / √(Σ x_i²)            (unit sphere; cosine-similarity friendly)
+//   L∞:  x' = x / max|x_i|             (max coordinate = 1)
+//
+// Distinct from StandardScaler: Normalizer operates PER ROW, not per
+// column. Common in text mining (TF vectors → L2 → cosine similarity)
+// and in neural net inputs where direction matters more than magnitude.
+
 module ml.preprocessing.normalizer
 
-pub struct Normalizer {
-    params: map
-    fitted: bool
-    history: list
+pub const L1: int = 1
+pub const L2: int = 2
+pub const LINF: int = 0
+
+fn abs_f(x: float) -> float { return if x < 0.0 { -x } else { x } }
+fn sqrt(x: float) -> float { if x <= 0.0 { return 0.0 }; let mut g = x; let mut i = 0; while i < 40 { g = 0.5 * (g + x / g); i += 1 }; return g }
+
+pub fn row_norm(x: [float], kind: int) -> float {
+    if kind == L2 {
+        let mut s = 0.0; let mut i = 0
+        while i < x.len() { s += x[i] * x[i]; i += 1 }
+        return sqrt(s)
+    }
+    if kind == L1 {
+        let mut s = 0.0; let mut i = 0
+        while i < x.len() { s += abs_f(x[i]); i += 1 }
+        return s
+    }
+    // L∞
+    let mut m = 0.0; let mut i = 0
+    while i < x.len() { let a = abs_f(x[i]); if a > m { m = a }; i += 1 }
+    return m
 }
 
-impl Normalizer {
-    pub fn new(params: map) -> Normalizer {
-        return Normalizer { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
+pub fn normalize(x: [float], kind: int) -> [float] {
+    let nrm = row_norm(x, kind)
+    let mut out: [float] = []
+    if nrm == 0.0 {
         let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
+        while i < x.len() { out.push(0.0); i += 1 }
+        return out
     }
+    let mut i = 0
+    while i < x.len() { out.push(x[i] / nrm); i += 1 }
+    return out
+}
+
+pub fn normalize_batch(x: [[float]], kind: int) -> [[float]] {
+    let mut out: [[float]] = []
+    let mut i = 0
+    while i < x.len() { out.push(normalize(x[i], kind)); i += 1 }
+    return out
 }
 
 fn main() {
-    let model = Normalizer .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Min-Max Normalizer trained: " + model.score(X, y) as str)
+    let v = [3.0, 4.0]
+    let l2 = normalize(v, L2)
+    println("L2(3,4) = (0.6, 0.8): [" + l2[0] as str + ", " + l2[1] as str + "]")
+    println("||L2|| = 1: " + row_norm(l2, L2) as str)
+    let l1 = normalize(v, L1)
+    println("L1(3,4) sum = 1: " + (l1[0] + l1[1]) as str)
+    let linf = normalize(v, LINF)
+    println("L∞(3,4) max = 1: " + linf[1] as str)
 }
