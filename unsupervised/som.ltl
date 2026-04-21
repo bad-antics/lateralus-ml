@@ -1,46 +1,139 @@
-// Self-Organizing Map
+// Self-Organizing Map — Kohonen 1982.
+//
+// Topology-preserving projection of high-dim data onto a 2-D grid of
+// neurons, each carrying a weight vector the same dimensionality as
+// the input.
+//
+// For each input x_t (epoch t):
+//   1. BMU = arg min_i ||w_i − x_t||            (best matching unit)
+//   2. Neighborhood function (Gaussian):
+//        h_{i,BMU}(t) = exp(−d²_{grid} / (2σ(t)²))
+//   3. Weight update:
+//        w_i ← w_i + η(t)·h_{i,BMU}(t)·(x_t − w_i)
+//
+// Learning rate η(t) and neighborhood radius σ(t) decay exponentially:
+//        η(t) = η₀ · exp(−t/T)
+//        σ(t) = σ₀ · exp(−t/T)
+//
+// Used in: exploratory data analysis, cluster visualization, vector
+// quantization, market segmentation.
+
 module ml.unsupervised.som
 
-pub struct Som {
-    params: map
-    fitted: bool
-    history: list
+pub struct SOM {
+    pub rows: int, pub cols: int, pub dim: int,
+    pub weights: [[[float]]],           // rows × cols × dim
 }
 
-impl Som {
-    pub fn new(params: map) -> Som {
-        return Som { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
+struct Rng { state: u64 }
+fn rng_new(seed: u64) -> Rng { return Rng { state: if seed == 0 { 1u64 } else { seed } } }
+fn rng_next(r: &mut Rng) -> u64 { let mut s = r.state; s ^= s >> 12; s ^= s << 25; s ^= s >> 27; r.state = s; return s * 2685821657736338717u64 }
+fn rng_f(r: &mut Rng) -> float { return ((rng_next(r) >> 11) as float) / 9007199254740992.0 }
+fn rng_range(r: &mut Rng, n: int) -> int { return (rng_next(r) as int % n + n) % n }
+
+fn exp(x: float) -> float {
+    if x < -700.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    let n = if x >= 0.0 { (x / ln2 + 0.5) as int } else { (x / ln2 - 0.5) as int }
+    let r = x - (n as float) * ln2
+    let mut t = 1.0; let mut s = 1.0; let mut k = 1
+    while k < 25 { t = t * r / (k as float); s += t; k += 1 }
+    let mag = if n < 0 { -n } else { n }
+    let mut p = 1.0; let mut i = 0
+    while i < mag { p = p * 2.0; i += 1 }
+    if n < 0 { p = 1.0 / p }
+    return s * p
+}
+
+pub fn init(rows: int, cols: int, dim: int, seed: u64) -> SOM {
+    let mut rng = rng_new(seed)
+    let mut w: [[[float]]] = []
+    let mut i = 0
+    while i < rows {
+        let mut row: [[float]] = []
+        let mut j = 0
+        while j < cols {
+            let mut v: [float] = []
+            let mut k = 0
+            while k < dim { v.push(rng_f(&mut rng)); k += 1 }
+            row.push(v); j += 1
         }
-        return predictions
+        w.push(row); i += 1
     }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
+    return SOM { rows: rows, cols: cols, dim: dim, weights: w }
+}
+
+fn sq_dist(a: [float], b: [float]) -> float {
+    let mut s = 0.0; let mut i = 0
+    while i < a.len() { let d = a[i] - b[i]; s += d * d; i += 1 }
+    return s
+}
+
+pub fn best_matching_unit(s: SOM, x: [float]) -> (int, int) {
+    let mut br = 0; let mut bc = 0
+    let mut bd = sq_dist(s.weights[0][0], x)
+    let mut i = 0
+    while i < s.rows {
+        let mut j = 0
+        while j < s.cols {
+            let d = sq_dist(s.weights[i][j], x)
+            if d < bd { bd = d; br = i; bc = j }
+            j += 1
         }
-        return correct as float / len(y) as float
+        i += 1
+    }
+    return (br, bc)
+}
+
+pub fn fit(s: &mut SOM, data: [[float]], epochs: int,
+            eta0: float, sigma0: float, seed: u64) -> () {
+    let mut rng = rng_new(seed)
+    let n = data.len()
+    let tau_eta = (epochs as float)
+    let tau_sig = (epochs as float) / ln_2()
+    let mut t = 0
+    while t < epochs {
+        let eta = eta0 * exp(-(t as float) / tau_eta)
+        let sigma = sigma0 * exp(-(t as float) / tau_sig)
+        let two_sigma2 = 2.0 * sigma * sigma
+        // Shuffle-like pass (random pick for each step)
+        let mut step = 0
+        while step < n {
+            let idx = rng_range(&mut rng, n)
+            let x = data[idx]
+            let (br, bc) = best_matching_unit(*s, x)
+            let mut i = 0
+            while i < s.rows {
+                let mut j = 0
+                while j < s.cols {
+                    let dr = (i - br) as float
+                    let dc = (j - bc) as float
+                    let h = exp(-(dr * dr + dc * dc) / two_sigma2)
+                    let lr = eta * h
+                    let mut k = 0
+                    while k < s.dim {
+                        s.weights[i][j][k] = s.weights[i][j][k] + lr * (x[k] - s.weights[i][j][k])
+                        k += 1
+                    }
+                    j += 1
+                }
+                i += 1
+            }
+            step += 1
+        }
+        t += 1
     }
 }
+
+fn ln_2() -> float { return 0.6931471805599453 }
 
 fn main() {
-    let model = Som .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Self-Organizing Map trained: " + model.score(X, y) as str)
+    // 3 clusters in 2-D; map onto 4×4 lattice.
+    let data = [[0.0, 0.0], [0.1, 0.0], [0.0, 0.1],
+                [5.0, 5.0], [5.1, 5.0], [5.0, 5.1],
+                [0.0, 5.0], [0.1, 5.0], [0.0, 5.1]]
+    let mut s = init(4, 4, 2, 11u64)
+    fit(&mut s, data, 20, 0.5, 2.0, 13u64)
+    let (r, c) = best_matching_unit(s, [5.0, 5.0])
+    println("BMU for (5,5): (" + r as str + "," + c as str + ")")
 }
