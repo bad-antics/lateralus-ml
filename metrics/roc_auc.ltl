@@ -1,46 +1,95 @@
-// ROC-AUC Score
+// Receiver Operating Characteristic curve & AUC.
+//
+// ROC plots TPR vs FPR as the classification threshold varies:
+//   TPR = TP / (TP + FN) = recall / sensitivity
+//   FPR = FP / (FP + TN) = 1 − specificity
+//
+// AUC = ∫₀¹ TPR(FPR) d(FPR)
+//
+// Equals the probability that a random positive scores higher than a
+// random negative (Mann-Whitney U interpretation, Hanley & McNeil 1982).
+//
+// AUC = 0.5: no better than random.   AUC = 1.0: perfect ranking.
+// Invariant under monotonic score transformations.
+//
+// Fast O(n log n) computation: sort by score; accumulate cumulative
+// positives/negatives; trapezoidal sum.
+
 module ml.metrics.roc_auc
 
-pub struct RocAuc {
-    params: map
-    fitted: bool
-    history: list
+pub fn roc_curve(scores: [float], y_true: [int]) -> ([float], [float], [float]) {
+    let n = scores.len()
+    let mut idx: [int] = []
+    let mut i = 0
+    while i < n { idx.push(i); i += 1 }
+    // Selection sort by descending score.
+    i = 0
+    while i < n {
+        let mut best = i
+        let mut j = i + 1
+        while j < n { if scores[idx[j]] > scores[idx[best]] { best = j }; j += 1 }
+        if best != i { let t = idx[i]; idx[i] = idx[best]; idx[best] = t }
+        i += 1
+    }
+    let mut total_pos = 0; let mut total_neg = 0
+    i = 0
+    while i < n { if y_true[i] == 1 { total_pos += 1 } else { total_neg += 1 }; i += 1 }
+    let mut tpr: [float] = [0.0]
+    let mut fpr: [float] = [0.0]
+    let mut thr: [float] = []
+    let mut tp = 0; let mut fp = 0
+    i = 0
+    while i < n {
+        let k = idx[i]
+        if y_true[k] == 1 { tp += 1 } else { fp += 1 }
+        tpr.push(if total_pos > 0 { (tp as float) / (total_pos as float) } else { 0.0 })
+        fpr.push(if total_neg > 0 { (fp as float) / (total_neg as float) } else { 0.0 })
+        thr.push(scores[k])
+        i += 1
+    }
+    return (fpr, tpr, thr)
 }
 
-impl RocAuc {
-    pub fn new(params: map) -> RocAuc {
-        return RocAuc { params: params, fitted: false, history: [] }
+/// Area under ROC curve via trapezoidal rule.
+pub fn auc(scores: [float], y_true: [int]) -> float {
+    let (fpr, tpr, _) = roc_curve(scores, y_true)
+    let mut area = 0.0
+    let mut i = 1
+    while i < fpr.len() {
+        area += 0.5 * (fpr[i] - fpr[i - 1]) * (tpr[i] + tpr[i - 1])
+        i += 1
     }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
+    return area
+}
+
+/// Alternative: Mann-Whitney U statistic for AUC (verification).
+pub fn auc_mw(scores: [float], y_true: [int]) -> float {
+    let mut n_pos = 0; let mut n_neg = 0
+    let n = scores.len()
+    let mut i = 0
+    while i < n { if y_true[i] == 1 { n_pos += 1 } else { n_neg += 1 }; i += 1 }
+    let mut count = 0.0
+    i = 0
+    while i < n {
+        if y_true[i] == 1 {
+            let mut j = 0
+            while j < n {
+                if y_true[j] == 0 {
+                    if scores[i] > scores[j] { count += 1.0 }
+                    else if scores[i] == scores[j] { count += 0.5 }
+                }
+                j += 1
+            }
         }
-        return predictions
+        i += 1
     }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+    if n_pos == 0 || n_neg == 0 { return 0.5 }
+    return count / ((n_pos as float) * (n_neg as float))
 }
 
 fn main() {
-    let model = RocAuc .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("ROC-AUC Score trained: " + model.score(X, y) as str)
+    let scores = [0.1, 0.4, 0.35, 0.8, 0.6, 0.2, 0.9, 0.7]
+    let y =      [  0,   0,    1,   1,   1,   0,   1,   0]
+    println("AUC (trap)  = " + auc(scores, y) as str)
+    println("AUC (MW)    = " + auc_mw(scores, y) as str)    // should match
 }
