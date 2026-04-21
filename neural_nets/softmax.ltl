@@ -1,46 +1,94 @@
-// Softmax Function
-module ml.neural_nets.softmax
+// neural_nets/softmax.ltl
+// Numerically stable softmax and log-softmax; softmax + cross-entropy fused gradient.
+// softmax(z)_i = exp(z_i - m) / sum_j exp(z_j - m), with m = max(z) for stability.
+// d/dz_i [ -log softmax(z)_y ] = softmax(z)_i - 1{i==y}.
+// Ref: Bridle 1990; Goodfellow Deep Learning ch. 6.
 
-pub struct Softmax {
-    params: map
-    fitted: bool
-    history: list
+module neural_nets.softmax
+
+pub fn exp_approx(x: f64) -> f64 {
+    if x > 40.0 { return 2.35385267e17 }
+    if x < -40.0 { return 0.0 }
+    let mut term: f64 = 1.0
+    let mut sum:  f64 = 1.0
+    let mut k: i64 = 1
+    while k < 60 {
+        term = term * x / (k as f64)
+        sum  = sum + term
+        k = k + 1
+    }
+    return sum
 }
 
-impl Softmax {
-    pub fn new(params: map) -> Softmax {
-        return Softmax { params: params, fitted: false, history: [] }
+pub fn log_approx(x: f64) -> f64 {
+    if x <= 0.0 { return -1.0e308 }
+    let mut m: i64 = 0
+    let mut v: f64 = x
+    while v > 2.0  { v = v / 2.71828182845904523; m = m + 1 }
+    while v < 0.5  { v = v * 2.71828182845904523; m = m - 1 }
+    let z: f64 = (v - 1.0) / (v + 1.0)
+    let z2: f64 = z * z
+    let mut s: f64 = 0.0
+    let mut k: i64 = 0
+    while k < 40 {
+        s = s + (1.0 / ((2 * k + 1) as f64)) * pow_int(z2, k)
+        k = k + 1
     }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+    return 2.0 * z * s + (m as f64)
 }
 
-fn main() {
-    let model = Softmax .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Softmax Function trained: " + model.score(X, y) as str)
+fn pow_int(x: f64, k: i64) -> f64 {
+    let mut r: f64 = 1.0
+    let mut i: i64 = 0
+    while i < k { r = r * x; i = i + 1 }
+    return r
+}
+
+pub fn softmax(z: [f64]) -> [f64] {
+    let n: u64 = len(z)
+    let mut m: f64 = z[0]
+    let mut i: u64 = 1
+    while i < n { if z[i] > m { m = z[i] }; i = i + 1 }
+    let mut y: [f64] = zeros(n)
+    let mut s: f64 = 0.0
+    i = 0
+    while i < n { y[i] = exp_approx(z[i] - m); s = s + y[i]; i = i + 1 }
+    i = 0
+    while i < n { y[i] = y[i] / s; i = i + 1 }
+    return y
+}
+
+pub fn log_softmax(z: [f64]) -> [f64] {
+    let n: u64 = len(z)
+    let mut m: f64 = z[0]
+    let mut i: u64 = 1
+    while i < n { if z[i] > m { m = z[i] }; i = i + 1 }
+    let mut s: f64 = 0.0
+    i = 0
+    while i < n { s = s + exp_approx(z[i] - m); i = i + 1 }
+    let lz: f64 = m + log_approx(s)
+    let mut y: [f64] = zeros(n)
+    i = 0
+    while i < n { y[i] = z[i] - lz; i = i + 1 }
+    return y
+}
+
+// Fused softmax-cross-entropy forward & gradient wrt logits.
+pub fn ce_loss(z: [f64], y: i64) -> f64 {
+    let ls: [f64] = log_softmax(z)
+    return -ls[y as u64]
+}
+
+pub fn ce_grad(z: [f64], y: i64) -> [f64] {
+    let mut g: [f64] = softmax(z)
+    g[y as u64] = g[y as u64] - 1.0
+    return g
+}
+
+pub fn main() {
+    let z: [f64] = [2.0, 1.0, 0.1]
+    let p: [f64] = softmax(z)
+    print("softmax=", p, " sum=", p[0] + p[1] + p[2])
+    print("ce(y=0)=", ce_loss(z, 0))
+    print("grad=", ce_grad(z, 0))
 }
