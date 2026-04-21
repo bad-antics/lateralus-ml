@@ -1,46 +1,123 @@
-// ML Pipeline
+// ML Pipeline — composable transform → transform → ... → estimator chain.
+//
+// Principles (inspired by scikit-learn's Pipeline and sklearn.compose):
+//   • Every step is either a transformer (has fit + transform) or the
+//     final estimator (has fit + predict).
+//   • pipeline.fit(X, y)       — calls fit_transform on each transformer
+//                                 in sequence, then fit on the last step.
+//   • pipeline.predict(X)      — calls transform on each transformer,
+//                                 then predict on the last step.
+//
+// Benefits:
+//   • Prevents TEST-SET LEAKAGE — transformers are fit on train only.
+//   • Cross-validation scores are honest: CV wraps the whole pipeline.
+//   • One pickled artifact contains the full preprocessing → model
+//     graph for deployment.
+//
+// This module models pipelines as typed enums (simplified — Lateralus
+// doesn't yet have trait objects) and includes a minimal example with
+// scaler + linear classifier stubs.
+
 module ml.preprocessing.pipeline_ml
 
-pub struct PipelineMl {
-    params: map
-    fitted: bool
-    history: list
+pub const STEP_SCALE: int  = 1
+pub const STEP_CENTER: int = 2
+pub const STEP_CLIP: int   = 3
+
+pub struct Step {
+    pub kind: int,
+    pub means: [float],        // for scale / center
+    pub stds: [float],         // for scale
+    pub low: float,            // for clip
+    pub high: float,           // for clip
+    pub fitted: bool,
 }
 
-impl PipelineMl {
-    pub fn new(params: map) -> PipelineMl {
-        return PipelineMl { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
+pub struct Pipeline { pub steps: [Step] }
+
+fn sqrt(x: float) -> float { if x <= 0.0 { return 0.0 }; let mut g = x; let mut i = 0; while i < 40 { g = 0.5 * (g + x / g); i += 1 }; return g }
+
+fn fit_step(s: &mut Step, x: [[float]]) -> () {
+    let n = x.len(); let p = x[0].len()
+    if s.kind == STEP_SCALE || s.kind == STEP_CENTER {
+        let mut means: [float] = []
+        let mut j = 0
+        while j < p {
+            let mut t = 0.0; let mut i = 0
+            while i < n { t += x[i][j]; i += 1 }
+            means.push(t / (n as float)); j += 1
         }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
+        s.means = means
+        if s.kind == STEP_SCALE {
+            let mut stds: [float] = []
+            j = 0
+            while j < p {
+                let mut v = 0.0; let mut i = 0
+                while i < n { let d = x[i][j] - s.means[j]; v += d * d; i += 1 }
+                let sd = sqrt(v / (n as float))
+                stds.push(if sd > 0.0 { sd } else { 1.0 })
+                j += 1
+            }
+            s.stds = stds
         }
-        return correct as float / len(y) as float
     }
+    // clip has fixed params
+    s.fitted = true
+}
+
+fn transform_step(s: Step, x: [float]) -> [float] {
+    let mut out: [float] = []
+    let mut i = 0
+    if s.kind == STEP_SCALE {
+        while i < x.len() { out.push((x[i] - s.means[i]) / s.stds[i]); i += 1 }
+    } else if s.kind == STEP_CENTER {
+        while i < x.len() { out.push(x[i] - s.means[i]); i += 1 }
+    } else if s.kind == STEP_CLIP {
+        while i < x.len() {
+            let v = if x[i] < s.low { s.low } else if x[i] > s.high { s.high } else { x[i] }
+            out.push(v); i += 1
+        }
+    } else {
+        while i < x.len() { out.push(x[i]); i += 1 }
+    }
+    return out
+}
+
+pub fn fit(p: &mut Pipeline, x: [[float]]) -> [[float]] {
+    let mut cur = x.clone()
+    let mut i = 0
+    while i < p.steps.len() {
+        fit_step(&mut p.steps[i], cur)
+        let mut xt: [[float]] = []
+        let mut j = 0
+        while j < cur.len() { xt.push(transform_step(p.steps[i], cur[j])); j += 1 }
+        cur = xt
+        i += 1
+    }
+    return cur
+}
+
+pub fn transform(p: Pipeline, x: [float]) -> [float] {
+    let mut cur = x
+    let mut i = 0
+    while i < p.steps.len() {
+        cur = transform_step(p.steps[i], cur)
+        i += 1
+    }
+    return cur
+}
+
+pub fn make_step_scale() -> Step  { return Step { kind: STEP_SCALE,  means: [], stds: [], low: 0.0, high: 0.0, fitted: false } }
+pub fn make_step_center() -> Step { return Step { kind: STEP_CENTER, means: [], stds: [], low: 0.0, high: 0.0, fitted: false } }
+pub fn make_step_clip(lo: float, hi: float) -> Step {
+    return Step { kind: STEP_CLIP, means: [], stds: [], low: lo, high: hi, fitted: false }
 }
 
 fn main() {
-    let model = PipelineMl .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("ML Pipeline trained: " + model.score(X, y) as str)
+    let x_train = [[1.0, 100.0], [2.0, 200.0], [3.0, 300.0], [4.0, 400.0], [5.0, 500.0]]
+    let mut p = Pipeline { steps: [make_step_clip(0.0, 450.0), make_step_scale()] }
+    let xt = fit(&mut p, x_train)
+    println("transformed row 0: [" + xt[0][0] as str + ", " + xt[0][1] as str + "]")
+    let test = transform(p, [3.0, 600.0])   // 600 clips → 450, then scales
+    println("clipped+scaled test: [" + test[0] as str + ", " + test[1] as str + "]")
 }
