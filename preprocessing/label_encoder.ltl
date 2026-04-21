@@ -1,46 +1,70 @@
-// Label Encoder
+// Label Encoder — map arbitrary class labels to 0-based integers.
+//
+//   ["cat", "dog", "cat", "fish"]  →  [0, 1, 0, 2]
+//
+// Unlike one-hot, produces a single integer per row → compact but
+// introduces a SPURIOUS ordinal relationship (cat < dog < fish) that
+// distance-based models (KNN, SVM, linear regression) may exploit
+// incorrectly. Safe to use for target labels of classifiers and for
+// tree-based features.
+//
+// For features with no intrinsic order, prefer one-hot or target
+// encoding. For truly ordinal data (cold/warm/hot) this IS the correct
+// encoding.
+
 module ml.preprocessing.label_encoder
 
-pub struct LabelEncoder {
-    params: map
-    fitted: bool
-    history: list
+pub struct LabelEncoder { pub classes: [int] }     // index = encoded value
+
+pub fn fit(labels: [int]) -> LabelEncoder {
+    let mut cats: [int] = []
+    let mut i = 0
+    while i < labels.len() {
+        let mut found = false
+        let mut j = 0
+        while j < cats.len() { if cats[j] == labels[i] { found = true; break }; j += 1 }
+        if !found { cats.push(labels[i]) }
+        i += 1
+    }
+    // Sort ascending for determinism.
+    i = 0
+    while i < cats.len() {
+        let mut j = i + 1
+        while j < cats.len() {
+            if cats[j] < cats[i] { let t = cats[i]; cats[i] = cats[j]; cats[j] = t }
+            j += 1
+        }
+        i += 1
+    }
+    return LabelEncoder { classes: cats }
 }
 
-impl LabelEncoder {
-    pub fn new(params: map) -> LabelEncoder {
-        return LabelEncoder { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+pub fn transform(le: LabelEncoder, label: int) -> int {
+    let mut i = 0
+    while i < le.classes.len() { if le.classes[i] == label { return i }; i += 1 }
+    return -1   // unknown
 }
+
+pub fn transform_batch(le: LabelEncoder, labels: [int]) -> [int] {
+    let mut out: [int] = []
+    let mut i = 0
+    while i < labels.len() { out.push(transform(le, labels[i])); i += 1 }
+    return out
+}
+
+pub fn inverse_transform(le: LabelEncoder, encoded: int) -> int {
+    if encoded < 0 || encoded >= le.classes.len() { return -1 }
+    return le.classes[encoded]
+}
+
+pub fn n_classes(le: LabelEncoder) -> int { return le.classes.len() }
 
 fn main() {
-    let model = LabelEncoder .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Label Encoder trained: " + model.score(X, y) as str)
+    let labels = [100, 200, 100, 300, 200, 100]
+    let le = fit(labels)
+    let enc = transform_batch(le, labels)
+    println("classes: [" + le.classes[0] as str + ", " + le.classes[1] as str + ", " + le.classes[2] as str + "]")
+    println("encoded: [" + enc[0] as str + ", " + enc[1] as str + ", " + enc[2] as str + ", " + enc[3] as str + "]")
+    println("inverse(2) = 300: " + inverse_transform(le, 2) as str)
+    println("n_classes = 3: " + n_classes(le) as str)
 }
