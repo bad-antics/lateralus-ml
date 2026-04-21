@@ -1,46 +1,111 @@
-// Lasso Regression
+// LASSO regression — L1-regularized linear regression (Tibshirani 1996).
+//
+//     L(β) = ||y − Xβ||² / (2n) + λ·||β||₁
+//
+// Unlike ridge, the L1 penalty induces EXACT zeros in β → automatic
+// feature selection. Convex but non-differentiable; solved here via
+// coordinate descent with soft-thresholding (Friedman et al. 2010
+// "Regularization Paths for Generalized Linear Models via Coordinate
+// Descent") — the algorithm behind scikit-learn and glmnet.
+//
+// Soft-threshold operator:
+//     S(z, γ) = sign(z) · max(|z| − γ, 0)
+//
+// The update for coordinate j (features standardized, column norms = 1):
+//     β_j ← S( (1/n)·Xⱼᵀ·r_j , λ )
+// with r_j = y − Σ_{k≠j} X_k·β_k the partial residual.
+
 module ml.supervised.lasso_regression
 
-pub struct LassoRegression {
-    params: map
-    fitted: bool
-    history: list
+pub struct Model { pub coef: [float], pub intercept: float }
+
+fn soft_threshold(z: float, gamma: float) -> float {
+    if z >  gamma { return z - gamma }
+    if z < -gamma { return z + gamma }
+    return 0.0
 }
 
-impl LassoRegression {
-    pub fn new(params: map) -> LassoRegression {
-        return LassoRegression { params: params, fitted: false, history: [] }
+pub fn fit(x: [[float]], y: [float], lambda: float, max_iters: int, tol: float) -> Model {
+    let n = x.len(); let p = x[0].len()
+    // Center y and columns of X.
+    let mut my = 0.0; let mut i = 0
+    while i < n { my += y[i]; i += 1 }
+    my = my / (n as float)
+    let mut mx: [float] = []
+    let mut j = 0
+    while j < p {
+        let mut s = 0.0; i = 0
+        while i < n { s += x[i][j]; i += 1 }
+        mx.push(s / (n as float)); j += 1
     }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
+    // Column sum-of-squares / n.
+    let mut col_ss: [float] = []
+    j = 0
+    while j < p {
+        let mut s = 0.0; i = 0
+        while i < n { let d = x[i][j] - mx[j]; s += d * d; i += 1 }
+        col_ss.push(s / (n as float)); j += 1
     }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
+    // Initialize residual r = y_centered - Xc·β, β = 0 → r = y_centered.
+    let mut r: [float] = []
+    i = 0
+    while i < n { r.push(y[i] - my); i += 1 }
+    let mut beta: [float] = []
+    j = 0
+    while j < p { beta.push(0.0); j += 1 }
+
+    let mut it = 0
+    while it < max_iters {
+        let mut max_change = 0.0
+        j = 0
+        while j < p {
+            // Add back contribution of β_j to residual, compute z, update.
+            let bj_old = beta[j]
+            let mut z = 0.0
+            i = 0
+            while i < n { z += (x[i][j] - mx[j]) * (r[i] + (x[i][j] - mx[j]) * bj_old); i += 1 }
+            z = z / (n as float)
+            let bj_new = if col_ss[j] > 0.0 { soft_threshold(z, lambda) / col_ss[j] } else { 0.0 }
+            let diff = bj_new - bj_old
+            if abs_f(diff) > max_change { max_change = abs_f(diff) }
+            // Update residual: r -= (x_j - mx_j) · diff
+            if diff != 0.0 {
+                i = 0
+                while i < n { r[i] -= (x[i][j] - mx[j]) * diff; i += 1 }
+            }
+            beta[j] = bj_new
+            j += 1
         }
-        return predictions
+        if max_change < tol { break }
+        it += 1
     }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+    let mut intercept = my
+    j = 0
+    while j < p { intercept -= beta[j] * mx[j]; j += 1 }
+    return Model { coef: beta, intercept: intercept }
 }
+
+pub fn predict(m: Model, x: [float]) -> float {
+    let mut s = m.intercept
+    let mut i = 0
+    while i < x.len() { s += m.coef[i] * x[i]; i += 1 }
+    return s
+}
+
+pub fn nonzero_features(m: Model) -> int {
+    let mut c = 0; let mut i = 0
+    while i < m.coef.len() { if m.coef[i] != 0.0 { c += 1 }; i += 1 }
+    return c
+}
+
+fn abs_f(x: float) -> float { return if x < 0.0 { -x } else { x } }
 
 fn main() {
-    let model = LassoRegression .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Lasso Regression trained: " + model.score(X, y) as str)
+    // y depends only on x1; x2, x3 are noise.
+    let x = [[1.0, 7.0, 0.3], [2.0, 1.0, 9.0], [3.0, 5.0, 2.0],
+             [4.0, 3.0, 6.0], [5.0, 8.0, 1.0], [6.0, 2.0, 7.0]]
+    let y = [ 2.0, 4.0, 6.0, 8.0, 10.0, 12.0]
+    let m = fit(x, y, 0.1, 1000, 1e-6)
+    println("LASSO β = [" + m.coef[0] as str + ", " + m.coef[1] as str + ", " + m.coef[2] as str + "]")
+    println("nonzero: " + nonzero_features(m) as str + "/3")
 }
