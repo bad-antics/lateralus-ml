@@ -1,46 +1,108 @@
-// Epsilon-Greedy Policy
+// ε-Greedy action selection — exploration vs. exploitation.
+//
+//   With probability ε:  choose a uniformly at random   (explore)
+//   With probability 1-ε: choose arg max Q(s, a)         (exploit)
+//
+// Trade-off: ε too small → stuck in local optimum; too large → never
+// cashes in on what it learned. Common schedules:
+//
+//   • Fixed                      ε = 0.1
+//   • Linear decay               ε(t) = max(ε_end, ε_start − t·Δ)
+//   • Exponential decay          ε(t) = ε_end + (ε_start − ε_end)·e^(-λt)
+//   • 1/t                        classic theoretical choice; GLIE
+//
+// For bandit problems, UCB1 and Thompson sampling usually beat ε-greedy.
+// For deep RL, NoisyNet, entropy regularization and parameter-noise
+// exploration often outperform ε-greedy.
+
 module ml.rl.epsilon_greedy
 
-pub struct EpsilonGreedy {
-    params: map
-    fitted: bool
-    history: list
+struct Rng { state: u64 }
+fn rng_new(seed: u64) -> Rng { return Rng { state: if seed == 0 { 1u64 } else { seed } } }
+fn rng_next(r: &mut Rng) -> u64 { let mut s = r.state; s ^= s >> 12; s ^= s << 25; s ^= s >> 27; r.state = s; return s * 2685821657736338717u64 }
+fn rng_f(r: &mut Rng) -> float { return ((rng_next(r) >> 11) as float) / 9007199254740992.0 }
+fn rng_range(r: &mut Rng, n: int) -> int { return (rng_next(r) as int % n + n) % n }
+
+fn exp(x: float) -> float {
+    if x < -700.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    let n = if x >= 0.0 { (x / ln2 + 0.5) as int } else { (x / ln2 - 0.5) as int }
+    let r = x - (n as float) * ln2
+    let mut t = 1.0; let mut s = 1.0; let mut k = 1
+    while k < 25 { t = t * r / (k as float); s += t; k += 1 }
+    let mag = if n < 0 { -n } else { n }
+    let mut p = 1.0; let mut i = 0
+    while i < mag { p = p * 2.0; i += 1 }
+    if n < 0 { p = 1.0 / p }
+    return s * p
 }
 
-impl EpsilonGreedy {
-    pub fn new(params: map) -> EpsilonGreedy {
-        return EpsilonGreedy { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+pub fn argmax(q_values: [float]) -> int {
+    let mut best = 0
+    let mut i = 1
+    while i < q_values.len() { if q_values[i] > q_values[best] { best = i }; i += 1 }
+    return best
 }
+
+pub fn select(q_values: [float], epsilon: float, rng: &mut Rng) -> int {
+    if rng_f(rng) < epsilon { return rng_range(rng, q_values.len()) }
+    return argmax(q_values)
+}
+
+pub fn linear_decay(eps_start: float, eps_end: float, step: int, duration: int) -> float {
+    if step >= duration { return eps_end }
+    let frac = (step as float) / (duration as float)
+    return eps_start + (eps_end - eps_start) * frac
+}
+
+pub fn exponential_decay(eps_start: float, eps_end: float, step: int, rate: float) -> float {
+    let decay = exp(-rate * (step as float))
+    return eps_end + (eps_start - eps_end) * decay
+}
+
+/// UCB1 (Auer, Cesa-Bianchi, Fischer 2002):
+///     UCB_j = Q̂_j + √(2·ln t / n_j)
+pub fn ucb1(q_values: [float], counts: [int], t: int) -> int {
+    // Play any untried arm once first.
+    let mut i = 0
+    while i < counts.len() { if counts[i] == 0 { return i }; i += 1 }
+    let mut best = 0; let mut best_v = -1e300
+    let ln_t = ln_f((t as float))
+    i = 0
+    while i < q_values.len() {
+        let bonus = sqrt_f(2.0 * ln_t / (counts[i] as float))
+        let v = q_values[i] + bonus
+        if v > best_v { best_v = v; best = i }
+        i += 1
+    }
+    return best
+}
+
+fn ln_f(x: float) -> float {
+    let ln2 = 0.6931471805599453; let mut m = x; let mut k = 0.0
+    while m >= 2.0 { m = m / 2.0; k += 1.0 }
+    while m < 1.0  { m = m * 2.0; k -= 1.0 }
+    let u = (m - 1.0) / (m + 1.0); let u2 = u * u
+    let mut term = u; let mut sum = 0.0; let mut n = 1
+    while n < 30 { sum += term / (n as float); term = term * u2; n += 2 }
+    return k * ln2 + 2.0 * sum
+}
+fn sqrt_f(x: float) -> float { if x <= 0.0 { return 0.0 }; let mut g = x; let mut i = 0; while i < 40 { g = 0.5 * (g + x / g); i += 1 }; return g }
 
 fn main() {
-    let model = EpsilonGreedy .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Epsilon-Greedy Policy trained: " + model.score(X, y) as str)
+    let q = [0.1, 0.9, 0.5]
+    let mut rng = rng_new(1u64)
+    let mut greedy_count = 0
+    let mut i = 0
+    while i < 1000 {
+        if select(q, 0.0, &mut rng) == 1 { greedy_count += 1 }
+        i += 1
+    }
+    println("ε=0 always picks arg max: " + greedy_count as str + "/1000")
+
+    println("linear(0.5→0.05 at 1000): " + linear_decay(0.5, 0.05, 500, 1000) as str)  // 0.275
+    println("exp(step=100, λ=0.01):   " + exponential_decay(1.0, 0.05, 100, 0.01) as str)
+
+    let counts = [10, 20, 5]
+    println("UCB1 pick (t=100): " + ucb1(q, counts, 100) as str)
 }
