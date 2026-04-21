@@ -1,46 +1,129 @@
-// Backpropagation
-module ml.neural_nets.backprop
+// neural_nets/backprop.ltl
+// Reference back-propagation on a 2-layer MLP with sigmoid hidden + softmax output
+// under cross-entropy loss. Shows the full chain-rule derivation used everywhere.
+// Forward:  z1 = W1 x + b1;  h = sigma(z1);  z2 = W2 h + b2;  y = softmax(z2).
+// Loss   :  L = -log y_t
+// Grads  :  dz2 = y - 1_t
+//           dW2 = dz2 h^T ;  db2 = dz2
+//           dh  = W2^T dz2
+//           dz1 = dh * sigma'(z1)  (sigma' = h*(1-h))
+//           dW1 = dz1 x^T ;  db1 = dz1
+// Ref: Rumelhart, Hinton & Williams 1986.
 
-pub struct Backprop {
-    params: map
-    fitted: bool
-    history: list
+module neural_nets.backprop
+
+pub fn exp_approx(x: f64) -> f64 {
+    if x > 40.0 { return 2.35385267e17 }
+    if x < -40.0 { return 0.0 }
+    let mut term: f64 = 1.0; let mut sum: f64 = 1.0; let mut k: i64 = 1
+    while k < 60 { term = term * x / (k as f64); sum = sum + term; k = k + 1 }
+    return sum
 }
 
-impl Backprop {
-    pub fn new(params: map) -> Backprop {
-        return Backprop { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+pub fn sigmoid(x: f64) -> f64 { return 1.0 / (1.0 + exp_approx(-x)) }
+
+pub fn softmax(z: [f64]) -> [f64] {
+    let n: u64 = len(z)
+    let mut m: f64 = z[0]; let mut i: u64 = 1
+    while i < n { if z[i] > m { m = z[i] }; i = i + 1 }
+    let mut y: [f64] = zeros(n); let mut s: f64 = 0.0
+    i = 0
+    while i < n { y[i] = exp_approx(z[i] - m); s = s + y[i]; i = i + 1 }
+    i = 0
+    while i < n { y[i] = y[i] / s; i = i + 1 }
+    return y
 }
 
-fn main() {
-    let model = Backprop .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Backpropagation trained: " + model.score(X, y) as str)
+pub fn matvec(W: [[f64]], x: [f64]) -> [f64] {
+    let r: u64 = len(W); let c: u64 = len(x)
+    let mut y: [f64] = zeros(r)
+    let mut i: u64 = 0
+    while i < r {
+        let mut s: f64 = 0.0; let mut j: u64 = 0
+        while j < c { s = s + W[i][j] * x[j]; j = j + 1 }
+        y[i] = s; i = i + 1
+    }
+    return y
+}
+
+pub fn matT_vec(W: [[f64]], x: [f64]) -> [f64] {
+    let r: u64 = len(W); let c: u64 = len(W[0])
+    let mut y: [f64] = zeros(c)
+    let mut i: u64 = 0
+    while i < r {
+        let mut j: u64 = 0
+        while j < c { y[j] = y[j] + W[i][j] * x[i]; j = j + 1 }
+        i = i + 1
+    }
+    return y
+}
+
+// Returns (dW1, db1, dW2, db2, loss).
+pub fn backprop(W1: [[f64]], b1: [f64], W2: [[f64]], b2: [f64],
+                x: [f64], t: i64) -> ([[f64]], [f64], [[f64]], [f64], f64) {
+    let z1: [f64] = add_v(matvec(W1, x), b1)
+    let h:  [f64] = apply_sigmoid(z1)
+    let z2: [f64] = add_v(matvec(W2, h), b2)
+    let y:  [f64] = softmax(z2)
+    let loss: f64 = -log_safe(y[t as u64])
+
+    let mut dz2: [f64] = y
+    dz2[t as u64] = dz2[t as u64] - 1.0
+
+    let mut dW2: [[f64]] = outer(dz2, h)
+    let db2: [f64] = dz2
+
+    let dh: [f64] = matT_vec(W2, dz2)
+    let mut dz1: [f64] = zeros(len(z1))
+    let mut i: u64 = 0
+    while i < len(z1) { dz1[i] = dh[i] * h[i] * (1.0 - h[i]); i = i + 1 }
+
+    let dW1: [[f64]] = outer(dz1, x)
+    let db1: [f64] = dz1
+    return (dW1, db1, dW2, db2, loss)
+}
+
+fn add_v(a: [f64], b: [f64]) -> [f64] {
+    let n: u64 = len(a); let mut r: [f64] = zeros(n); let mut i: u64 = 0
+    while i < n { r[i] = a[i] + b[i]; i = i + 1 }
+    return r
+}
+fn apply_sigmoid(z: [f64]) -> [f64] {
+    let n: u64 = len(z); let mut r: [f64] = zeros(n); let mut i: u64 = 0
+    while i < n { r[i] = sigmoid(z[i]); i = i + 1 }
+    return r
+}
+fn outer(u: [f64], v: [f64]) -> [[f64]] {
+    let r: u64 = len(u); let c: u64 = len(v)
+    let mut M: [[f64]] = mat_zeros(r, c)
+    let mut i: u64 = 0
+    while i < r { let mut j: u64 = 0; while j < c { M[i][j] = u[i] * v[j]; j = j + 1 }; i = i + 1 }
+    return M
+}
+fn log_safe(x: f64) -> f64 {
+    if x <= 0.0 { return 1.0e308 }
+    let mut v: f64 = x; let mut m: i64 = 0
+    while v > 2.0 { v = v / 2.71828182845904523; m = m + 1 }
+    while v < 0.5 { v = v * 2.71828182845904523; m = m - 1 }
+    let z: f64 = (v - 1.0) / (v + 1.0); let z2: f64 = z * z
+    let mut s: f64 = 0.0; let mut k: i64 = 0
+    while k < 30 { s = s + (1.0 / ((2*k + 1) as f64)) * pow_int(z2, k); k = k + 1 }
+    return 2.0 * z * s + (m as f64)
+}
+fn pow_int(x: f64, k: i64) -> f64 {
+    let mut r: f64 = 1.0; let mut i: i64 = 0
+    while i < k { r = r * x; i = i + 1 }
+    return r
+}
+
+pub fn main() {
+    let W1: [[f64]] = [[0.1, 0.2], [-0.3, 0.4]]
+    let b1: [f64]   = [0.0, 0.0]
+    let W2: [[f64]] = [[0.5, -0.6], [0.7, 0.8]]
+    let b2: [f64]   = [0.0, 0.0]
+    let x:  [f64]   = [1.0, -1.0]
+    let (dW1, db1, dW2, db2, loss): ([[f64]], [f64], [[f64]], [f64], f64) = backprop(W1, b1, W2, b2, x, 1)
+    print("loss=", loss)
+    print("dW2=", dW2, " db2=", db2)
+    print("dW1=", dW1, " db1=", db1)
 }
