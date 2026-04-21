@@ -1,46 +1,116 @@
-// Gradient Boosting
+// Gradient Boosting (Friedman 2001) — additive model built greedily.
+//
+//   F_m(x) = F_{m-1}(x) + ν · h_m(x)
+//
+// where h_m is a weak learner (regression tree stump here) fit to the
+// negative gradient of the loss w.r.t. current predictions — i.e. the
+// residuals for squared-error loss.
+//
+// Algorithm (squared loss; regression):
+//   1. F_0(x) = mean(y)
+//   2. For m = 1..M:
+//        r_i = y_i − F_{m-1}(x_i)              (residual = -∂L/∂F)
+//        Fit h_m(x) ≈ r_i                       (a single-depth "stump")
+//        F_m(x) = F_{m-1}(x) + ν·h_m(x)         (ν = learning rate ≈ 0.1)
+//   3. Return F_M.
+//
+// This minimal version uses depth-1 stumps. Real-world XGBoost / LightGBM
+// use Newton-style second-order updates, histogram bucketing, per-leaf
+// regularization, and millions of trees on billions of rows.
+
 module ml.supervised.gradient_boosting
 
-pub struct GradientBoosting {
-    params: map
-    fitted: bool
-    history: list
-}
+pub struct Stump { pub feature: int, pub threshold: float,
+                   pub left_val: float, pub right_val: float }
+pub struct Model { pub base: float, pub stumps: [Stump], pub lr: float }
 
-impl GradientBoosting {
-    pub fn new(params: map) -> GradientBoosting {
-        return GradientBoosting { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
+fn best_stump(x: [[float]], residuals: [float]) -> Stump {
+    let n = x.len(); let p = x[0].len()
+    let mut best_sse = 1e300
+    let mut best = Stump { feature: 0, threshold: 0.0, left_val: 0.0, right_val: 0.0 }
+    let mut f = 0
+    while f < p {
         let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
+        while i < n {
+            let thr = x[i][f]
+            let mut sl = 0.0; let mut cl = 0
+            let mut sr = 0.0; let mut cr = 0
+            let mut j = 0
+            while j < n {
+                if x[j][f] <= thr { sl += residuals[j]; cl += 1 }
+                else              { sr += residuals[j]; cr += 1 }
+                j += 1
+            }
+            if cl == 0 || cr == 0 { i += 1; continue }
+            let ml = sl / (cl as float)
+            let mr = sr / (cr as float)
+            let mut sse = 0.0
+            j = 0
+            while j < n {
+                let pred = if x[j][f] <= thr { ml } else { mr }
+                let d = residuals[j] - pred
+                sse += d * d
+                j += 1
+            }
+            if sse < best_sse {
+                best_sse = sse
+                best = Stump { feature: f, threshold: thr, left_val: ml, right_val: mr }
+            }
             i += 1
         }
-        return correct as float / len(y) as float
+        f += 1
     }
+    return best
+}
+
+fn stump_predict(s: Stump, x: [float]) -> float {
+    return if x[s.feature] <= s.threshold { s.left_val } else { s.right_val }
+}
+
+pub fn fit(x: [[float]], y: [float], n_estimators: int, lr: float) -> Model {
+    let n = y.len()
+    let mut base = 0.0
+    let mut i = 0
+    while i < n { base += y[i]; i += 1 }
+    base = base / (n as float)
+    let mut preds: [float] = []
+    i = 0
+    while i < n { preds.push(base); i += 1 }
+    let mut stumps: [Stump] = []
+    let mut m = 0
+    while m < n_estimators {
+        let mut r: [float] = []
+        i = 0
+        while i < n { r.push(y[i] - preds[i]); i += 1 }
+        let s = best_stump(x, r)
+        i = 0
+        while i < n { preds[i] += lr * stump_predict(s, x[i]); i += 1 }
+        stumps.push(s)
+        m += 1
+    }
+    return Model { base: base, stumps: stumps, lr: lr }
+}
+
+pub fn predict(m: Model, x: [float]) -> float {
+    let mut p = m.base
+    let mut i = 0
+    while i < m.stumps.len() { p += m.lr * stump_predict(m.stumps[i], x); i += 1 }
+    return p
+}
+
+pub fn mse(m: Model, x: [[float]], y: [float]) -> float {
+    let n = x.len()
+    let mut s = 0.0
+    let mut i = 0
+    while i < n { let d = y[i] - predict(m, x[i]); s += d * d; i += 1 }
+    return s / (n as float)
 }
 
 fn main() {
-    let model = GradientBoosting .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Gradient Boosting trained: " + model.score(X, y) as str)
+    // Noisy parabola y = x²
+    let x = [[1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0], [9.0], [10.0]]
+    let y = [ 1.0, 4.0, 9.0, 16.0, 25.0, 36.0, 49.0, 64.0, 81.0, 100.0]
+    let m = fit(x, y, 50, 0.1)
+    println("MSE = " + mse(m, x, y) as str)
+    println("pred(5.5) ≈ 30.25: " + predict(m, [5.5]) as str)
 }
