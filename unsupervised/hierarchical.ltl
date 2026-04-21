@@ -1,46 +1,152 @@
-// Hierarchical Clustering
+// Hierarchical Agglomerative Clustering (Johnson 1967; Lance-Williams 1967).
+//
+// Bottom-up:
+//   1. Start with n singleton clusters
+//   2. Merge the two closest clusters per the linkage rule
+//   3. Repeat until one cluster remains
+//
+// Linkage rules (distance between clusters A, B):
+//   • Single:   min_{a∈A, b∈B} d(a,b)         chaining; susceptible to bridges
+//   • Complete: max_{a∈A, b∈B} d(a,b)         compact clusters
+//   • Average:  mean over all pairs           compromise (UPGMA)
+//
+// Result is a dendrogram — cut at any height to obtain a flat
+// partition. Complexity: O(n²) memory (distance matrix), O(n³) time
+// with naive implementation, or O(n² log n) with heaps (SLINK/CLINK).
+
 module ml.unsupervised.hierarchical
 
-pub struct Hierarchical {
-    params: map
-    fitted: bool
-    history: list
+pub const LINK_SINGLE: int   = 0
+pub const LINK_COMPLETE: int = 1
+pub const LINK_AVERAGE: int  = 2
+
+/// Each merge: (i, j, distance, new_size).
+pub struct Merge { pub i: int, pub j: int, pub dist: float, pub size: int }
+
+fn euclidean(a: [float], b: [float]) -> float {
+    let mut s = 0.0; let mut i = 0
+    while i < a.len() { let d = a[i] - b[i]; s += d * d; i += 1 }
+    return sqrt(s)
 }
 
-impl Hierarchical {
-    pub fn new(params: map) -> Hierarchical {
-        return Hierarchical { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
+fn sqrt(x: float) -> float { if x <= 0.0 { return 0.0 }; let mut g = x; let mut i = 0; while i < 40 { g = 0.5 * (g + x / g); i += 1 }; return g }
+
+/// Returns the dendrogram as a list of n-1 merges.
+pub fn fit(x: [[float]], linkage: int) -> [Merge] {
+    let n = x.len()
+    // Active cluster ids and their member index lists.
+    let mut members: [[int]] = []
+    let mut active: [int] = []
+    let mut sizes: [int] = []
+    let mut i = 0
+    while i < n { members.push([i]); active.push(i); sizes.push(1); i += 1 }
+    // Distance lookup between two cluster id lists under chosen linkage.
+    let mut merges: [Merge] = []
+    let mut next_id = n
+    while active.len() > 1 {
+        let mut best_d = 1e300
+        let mut best_a = 0; let mut best_b = 1
+        let mut ai = 0
+        while ai < active.len() {
+            let mut bi = ai + 1
+            while bi < active.len() {
+                let ca = active[ai]; let cb = active[bi]
+                let ma = members[ca as int]; let mb = members[cb as int]
+                let d = cluster_dist(x, ma, mb, linkage)
+                if d < best_d { best_d = d; best_a = ai; best_b = bi }
+                bi += 1
+            }
+            ai += 1
         }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
+        let ca = active[best_a]; let cb = active[best_b]
+        // Union membership
+        let mut new_members: [int] = []
+        let mut j = 0
+        while j < members[ca as int].len() { new_members.push(members[ca as int][j]); j += 1 }
+        j = 0
+        while j < members[cb as int].len() { new_members.push(members[cb as int][j]); j += 1 }
+        members.push(new_members)
+        sizes.push(sizes[ca as int] + sizes[cb as int])
+        merges.push(Merge { i: ca, j: cb, dist: best_d,
+                            size: sizes[ca as int] + sizes[cb as int] })
+        // Remove ca, cb from active; add new id (higher index first).
+        let hi = if best_a > best_b { best_a } else { best_b }
+        let lo = if best_a < best_b { best_a } else { best_b }
+        // manual remove
+        let mut na: [int] = []
+        j = 0
+        while j < active.len() {
+            if j != hi && j != lo { na.push(active[j]) }
+            j += 1
         }
-        return correct as float / len(y) as float
+        na.push(next_id)
+        active = na
+        next_id += 1
     }
+    return merges
+}
+
+fn cluster_dist(x: [[float]], a: [int], b: [int], linkage: int) -> float {
+    let mut acc = if linkage == LINK_SINGLE { 1e300 } else if linkage == LINK_COMPLETE { 0.0 } else { 0.0 }
+    let mut count = 0
+    let mut i = 0
+    while i < a.len() {
+        let mut j = 0
+        while j < b.len() {
+            let d = euclidean(x[a[i]], x[b[j]])
+            if linkage == LINK_SINGLE   { if d < acc { acc = d } }
+            else if linkage == LINK_COMPLETE { if d > acc { acc = d } }
+            else { acc += d; count += 1 }
+            j += 1
+        }
+        i += 1
+    }
+    if linkage == LINK_AVERAGE { return acc / (count as float) }
+    return acc
+}
+
+/// Cut the dendrogram to produce exactly k flat clusters.
+pub fn flat_clusters(merges: [Merge], n: int, k: int) -> [int] {
+    // Apply the first n - k merges (sorted by insertion order).
+    // Use union-find to assign labels.
+    let mut parent: [int] = []
+    let mut i = 0
+    while i < n + merges.len() { parent.push(i); i += 1 }
+    let cutoff = n - k
+    i = 0
+    while i < cutoff {
+        let m = merges[i]
+        let ra = find(&mut parent, m.i); let rb = find(&mut parent, m.j)
+        if ra != rb { parent[ra as int] = rb }
+        i += 1
+    }
+    let mut labels: [int] = []
+    let mut seen: [int] = []
+    let mut next_label = 0
+    i = 0
+    while i < n {
+        let r = find(&mut parent, i)
+        let mut j = 0; let mut lab = -1
+        while j < seen.len() { if seen[j] == r { lab = j; break }; j += 1 }
+        if lab < 0 { lab = next_label; seen.push(r); next_label += 1 }
+        labels.push(lab)
+        i += 1
+    }
+    return labels
+}
+fn find(p: &mut [int], x: int) -> int {
+    let mut r = x
+    while p[r as int] != r { r = p[r as int] }
+    let mut c = x
+    while p[c as int] != r { let n = p[c as int]; p[c as int] = r; c = n }
+    return r
 }
 
 fn main() {
-    let model = Hierarchical .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Hierarchical Clustering trained: " + model.score(X, y) as str)
+    let x = [[0.0, 0.0], [0.1, 0.0], [0.0, 0.1],
+             [5.0, 5.0], [5.1, 5.0], [5.0, 5.1]]
+    let merges = fit(x, LINK_AVERAGE)
+    println("#merges: " + merges.len() as str)           // 5
+    let labels = flat_clusters(merges, 6, 2)
+    println("labels: " + labels[0] as str + " " + labels[3] as str)  // different
 }
