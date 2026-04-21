@@ -1,46 +1,63 @@
-// Adam Optimizer
-module ml.neural_nets.adam_optim
+// neural_nets/adam_optim.ltl
+// Adam optimizer (Kingma & Ba 2015).
+// m_t = b1 m_{t-1} + (1-b1) g
+// v_t = b2 v_{t-1} + (1-b2) g^2
+// m_hat = m_t / (1 - b1^t);  v_hat = v_t / (1 - b2^t)
+// w <- w - lr * m_hat / (sqrt(v_hat) + eps)
 
-pub struct AdamOptim {
-    params: map
-    fitted: bool
-    history: list
+module neural_nets.adam_optim
+
+pub fn sqrt_newton(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    let mut r: f64 = x
+    let mut i: u64 = 0
+    while i < 40 { r = 0.5 * (r + x / r); i = i + 1 }
+    return r
 }
 
-impl AdamOptim {
-    pub fn new(params: map) -> AdamOptim {
-        return AdamOptim { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
+pub struct Adam {
+    lr: f64, b1: f64, b2: f64, eps: f64,
+    t: u64,
+    m: [f64],
+    v: [f64],
+}
+
+pub fn new_adam(dim: u64, lr: f64) -> Adam {
+    return Adam { lr: lr, b1: 0.9, b2: 0.999, eps: 1.0e-8, t: 0, m: zeros(dim), v: zeros(dim) }
+}
+
+pub fn pow_f(b: f64, k: u64) -> f64 {
+    let mut r: f64 = 1.0
+    let mut i: u64 = 0
+    while i < k { r = r * b; i = i + 1 }
+    return r
+}
+
+pub fn step(a: &mut Adam, w: &mut [f64], g: [f64]) {
+    a.t = a.t + 1
+    let n: u64 = len(w)
+    let bc1: f64 = 1.0 - pow_f(a.b1, a.t)
+    let bc2: f64 = 1.0 - pow_f(a.b2, a.t)
+    let mut i: u64 = 0
+    while i < n {
+        a.m[i] = a.b1 * a.m[i] + (1.0 - a.b1) * g[i]
+        a.v[i] = a.b2 * a.v[i] + (1.0 - a.b2) * g[i] * g[i]
+        let mh: f64 = a.m[i] / bc1
+        let vh: f64 = a.v[i] / bc2
+        w[i] = w[i] - a.lr * mh / (sqrt_newton(vh) + a.eps)
+        i = i + 1
     }
 }
 
-fn main() {
-    let model = AdamOptim .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Adam Optimizer trained: " + model.score(X, y) as str)
+pub fn main() {
+    // Minimise f(w) = (w0-1)^2 + (w1+2)^2.
+    let mut w: [f64] = [0.0, 0.0]
+    let mut opt: Adam = new_adam(2, 0.05)
+    let mut t: u64 = 0
+    while t < 500 {
+        let g: [f64] = [2.0 * (w[0] - 1.0), 2.0 * (w[1] + 2.0)]
+        step(&mut opt, &mut w, g)
+        t = t + 1
+    }
+    print("w=", w, " expected [1, -2]")
 }
