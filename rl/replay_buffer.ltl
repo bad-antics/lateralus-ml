@@ -1,46 +1,86 @@
-// Experience Replay
+// Experience Replay Buffer (Lin 1992; popularized by DQN, Mnih 2015).
+//
+// Ring buffer of transitions (s, a, r, s', done). Training samples
+// mini-batches uniformly at random from the buffer, which:
+//   1. Breaks the temporal correlation of consecutive samples (helps
+//      SGD convergence; satisfies the i.i.d. assumption approximately)
+//   2. Reuses each experience many times → sample-efficient
+//   3. Stabilizes Q-learning with non-linear function approximators
+//
+// Variants:
+//   • Prioritized Experience Replay (Schaul et al. 2016): sample with
+//     probability ∝ |TD-error|^α, correct bias with importance weights
+//   • Hindsight Experience Replay (Andrychowicz 2017): relabel goals
+//     in failed episodes
+//
+// This implementation is uniform-sampling only; capacity-bounded with
+// overwrite-oldest policy.
+
 module ml.rl.replay_buffer
 
-pub struct ReplayBuffer {
-    params: map
-    fitted: bool
-    history: list
+pub struct Transition {
+    pub s: [float], pub a: int, pub r: float,
+    pub s2: [float], pub done: bool,
 }
 
-impl ReplayBuffer {
-    pub fn new(params: map) -> ReplayBuffer {
-        return ReplayBuffer { params: params, fitted: false, history: [] }
+pub struct ReplayBuffer {
+    pub capacity: int,
+    pub buffer: [Transition],
+    pub head: int,              // next write index
+    pub size: int,              // number of valid entries
+}
+
+struct Rng { state: u64 }
+fn rng_new(seed: u64) -> Rng { return Rng { state: if seed == 0 { 1u64 } else { seed } } }
+fn rng_next(r: &mut Rng) -> u64 { let mut s = r.state; s ^= s >> 12; s ^= s << 25; s ^= s >> 27; r.state = s; return s * 2685821657736338717u64 }
+fn rng_range(r: &mut Rng, n: int) -> int { return (rng_next(r) as int % n + n) % n }
+
+pub fn new_buffer(capacity: int) -> ReplayBuffer {
+    let sentinel = Transition { s: [], a: 0, r: 0.0, s2: [], done: false }
+    let mut buf: [Transition] = []
+    let mut i = 0
+    while i < capacity { buf.push(sentinel); i += 1 }
+    return ReplayBuffer { capacity: capacity, buffer: buf, head: 0, size: 0 }
+}
+
+pub fn push(rb: &mut ReplayBuffer, t: Transition) -> () {
+    rb.buffer[rb.head] = t
+    rb.head = (rb.head + 1) % rb.capacity
+    if rb.size < rb.capacity { rb.size += 1 }
+}
+
+pub fn sample(rb: ReplayBuffer, batch_size: int, rng: &mut Rng) -> [Transition] {
+    let mut out: [Transition] = []
+    let mut i = 0
+    while i < batch_size {
+        let idx = rng_range(rng, rb.size)
+        out.push(rb.buffer[idx])
+        i += 1
     }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+    return out
+}
+
+pub fn len_(rb: ReplayBuffer) -> int { return rb.size }
+pub fn is_full(rb: ReplayBuffer) -> bool { return rb.size == rb.capacity }
+
+pub fn clear(rb: &mut ReplayBuffer) -> () {
+    rb.head = 0; rb.size = 0
 }
 
 fn main() {
-    let model = ReplayBuffer .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Experience Replay trained: " + model.score(X, y) as str)
+    let mut rb = new_buffer(5)
+    let mut rng = rng_new(42u64)
+    let mut i = 0
+    while i < 10 {
+        let t = Transition { s: [(i as float)], a: i % 2, r: (i as float) * 0.1,
+                             s2: [((i + 1) as float)], done: i == 9 }
+        push(&mut rb, t)
+        i += 1
+    }
+    println("full (cap=5): " + is_full(rb) as str)
+    println("size: " + len_(rb) as str)
+    // Buffer should now hold entries i = 5..9 (oldest overwritten).
+    let batch = sample(rb, 3, &mut rng)
+    println("sampled batch size: " + batch.len() as str)
+    println("sample a: " + batch[0].a as str)
 }
