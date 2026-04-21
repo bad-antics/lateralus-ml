@@ -1,46 +1,157 @@
-// Autoencoder
+// Autoencoder — unsupervised neural network for representation learning.
+//
+//     x → encoder → z → decoder → x̂
+//
+// Minimize reconstruction loss:  L = ||x − x̂||²
+//
+// Minimal architecture implemented here (one hidden bottleneck layer,
+// tanh activation):
+//
+//     h = tanh(W₁·x + b₁)           (encoder — latent code)
+//     x̂ = W₂·h + b₂                 (decoder — linear output)
+//
+// Trained with full-batch gradient descent; gradients derived
+// analytically (no autograd):
+//
+//   dL/dW₂ =  δ_out · hᵀ            δ_out = 2·(x̂ − x)
+//   dL/db₂ =  δ_out
+//   dL/dW₁ = (W₂ᵀ·δ_out) ⊙ (1 − h²) · xᵀ
+//
+// Once bottleneck dim < input dim, this learns a non-linear PCA-like
+// projection. Variants: denoising, sparse, variational (VAE), contractive.
+
 module ml.unsupervised.autoencoder
 
-pub struct Autoencoder {
-    params: map
-    fitted: bool
-    history: list
+pub struct AE {
+    pub w1: [[float]], pub b1: [float],    // encoder: latent × input
+    pub w2: [[float]], pub b2: [float],    // decoder: input × latent
 }
 
-impl Autoencoder {
-    pub fn new(params: map) -> Autoencoder {
-        return Autoencoder { params: params, fitted: false, history: [] }
+struct Rng { state: u64 }
+fn rng_new(seed: u64) -> Rng { return Rng { state: if seed == 0 { 1u64 } else { seed } } }
+fn rng_next(r: &mut Rng) -> u64 { let mut s = r.state; s ^= s >> 12; s ^= s << 25; s ^= s >> 27; r.state = s; return s * 2685821657736338717u64 }
+fn rng_f(r: &mut Rng) -> float { return ((rng_next(r) >> 11) as float) / 9007199254740992.0 * 2.0 - 1.0 }
+
+fn tanh_f(x: float) -> float {
+    if x > 20.0 { return 1.0 }
+    if x < -20.0 { return -1.0 }
+    let e1 = exp(x); let e2 = exp(-x)
+    return (e1 - e2) / (e1 + e2)
+}
+fn exp(x: float) -> float {
+    let ln2 = 0.6931471805599453
+    let n = if x >= 0.0 { (x / ln2 + 0.5) as int } else { (x / ln2 - 0.5) as int }
+    let r = x - (n as float) * ln2
+    let mut t = 1.0; let mut s = 1.0; let mut k = 1
+    while k < 25 { t = t * r / (k as float); s += t; k += 1 }
+    let mag = if n < 0 { -n } else { n }
+    let mut p = 1.0; let mut i = 0
+    while i < mag { p = p * 2.0; i += 1 }
+    if n < 0 { p = 1.0 / p }
+    return s * p
+}
+
+pub fn init(d_in: int, d_latent: int, seed: u64) -> AE {
+    let mut rng = rng_new(seed)
+    let scale = 0.3
+    let mut w1: [[float]] = []; let mut b1: [float] = []
+    let mut i = 0
+    while i < d_latent {
+        let mut row: [float] = []; let mut j = 0
+        while j < d_in { row.push(rng_f(&mut rng) * scale); j += 1 }
+        w1.push(row); b1.push(0.0); i += 1
     }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
+    let mut w2: [[float]] = []; let mut b2: [float] = []
+    i = 0
+    while i < d_in {
+        let mut row: [float] = []; let mut j = 0
+        while j < d_latent { row.push(rng_f(&mut rng) * scale); j += 1 }
+        w2.push(row); b2.push(0.0); i += 1
     }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
+    return AE { w1: w1, b1: b1, w2: w2, b2: b2 }
+}
+
+pub fn encode(ae: AE, x: [float]) -> [float] {
+    let m = ae.w1.len()
+    let mut h: [float] = []
+    let mut i = 0
+    while i < m {
+        let mut s = ae.b1[i]
+        let mut j = 0
+        while j < x.len() { s += ae.w1[i][j] * x[j]; j += 1 }
+        h.push(tanh_f(s)); i += 1
+    }
+    return h
+}
+
+pub fn decode(ae: AE, h: [float]) -> [float] {
+    let d = ae.w2.len()
+    let mut y: [float] = []
+    let mut i = 0
+    while i < d {
+        let mut s = ae.b2[i]
+        let mut j = 0
+        while j < h.len() { s += ae.w2[i][j] * h[j]; j += 1 }
+        y.push(s); i += 1
+    }
+    return y
+}
+
+pub fn fit(ae: &mut AE, x: [[float]], lr: float, epochs: int) -> float {
+    let n = x.len()
+    let d_in = ae.w2.len()
+    let d_lat = ae.w1.len()
+    let mut final_loss = 0.0
+    let mut ep = 0
+    while ep < epochs {
+        let mut total = 0.0
+        let mut s = 0
+        while s < n {
+            // Forward
+            let h = encode(*ae, x[s])
+            let y = decode(*ae, h)
+            // Loss
+            let mut err: [float] = []
+            let mut i = 0
+            while i < d_in { let d = y[i] - x[s][i]; err.push(2.0 * d); total += d * d; i += 1 }
+            // Gradients (decoder: linear)
+            i = 0
+            while i < d_in {
+                let mut j = 0
+                while j < d_lat { ae.w2[i][j] = ae.w2[i][j] - lr * err[i] * h[j]; j += 1 }
+                ae.b2[i] = ae.b2[i] - lr * err[i]
+                i += 1
+            }
+            // Backprop to encoder: δ_h_j = (W₂ᵀ err)_j · (1 - h_j²)
+            let mut delta_h: [float] = []
+            let mut j = 0
+            while j < d_lat {
+                let mut acc = 0.0
+                i = 0
+                while i < d_in { acc += ae.w2[i][j] * err[i]; i += 1 }
+                delta_h.push(acc * (1.0 - h[j] * h[j])); j += 1
+            }
+            j = 0
+            while j < d_lat {
+                let mut i2 = 0
+                while i2 < d_in { ae.w1[j][i2] = ae.w1[j][i2] - lr * delta_h[j] * x[s][i2]; i2 += 1 }
+                ae.b1[j] = ae.b1[j] - lr * delta_h[j]
+                j += 1
+            }
+            s += 1
         }
-        return predictions
+        final_loss = total / ((n * d_in) as float)
+        ep += 1
     }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+    return final_loss
 }
 
 fn main() {
-    let model = Autoencoder .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Autoencoder trained: " + model.score(X, y) as str)
+    let x = [[1.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 1.0],
+             [1.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 1.0]]
+    let mut ae = init(4, 2, 7u64)
+    let loss = fit(&mut ae, x, 0.05, 500)
+    println("final MSE: " + loss as str)
+    let r = decode(ae, encode(ae, [1.0, 0.0, 1.0, 0.0]))
+    println("reconstruct[0] ≈ 1: " + r[0] as str)
 }
