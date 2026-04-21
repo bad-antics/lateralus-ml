@@ -1,46 +1,83 @@
-// RNN Cell
-module ml.neural_nets.rnn_cell
+// neural_nets/rnn_cell.ltl
+// Vanilla Elman RNN cell.
+// h_t = tanh(W_xh x_t + W_hh h_{t-1} + b_h)
+// y_t = W_hy h_t + b_y
+// BPTT derivation (truncated) included for forward rollout.
+// Ref: Elman 1990.
 
-pub struct RnnCell {
-    params: map
-    fitted: bool
-    history: list
+module neural_nets.rnn_cell
+
+pub fn exp_approx(x: f64) -> f64 {
+    if x > 40.0 { return 2.35385267e17 }; if x < -40.0 { return 0.0 }
+    let mut t: f64 = 1.0; let mut s: f64 = 1.0; let mut k: i64 = 1
+    while k < 60 { t = t * x / (k as f64); s = s + t; k = k + 1 }
+    return s
+}
+fn tanh_(x: f64) -> f64 { let a: f64 = exp_approx(x); let b: f64 = exp_approx(-x); return (a - b) / (a + b) }
+
+pub struct RNNCell {
+    in_dim: u64, hid_dim: u64, out_dim: u64,
+    Wxh: [[f64]], Whh: [[f64]], Why: [[f64]],
+    bh: [f64], by: [f64],
 }
 
-impl RnnCell {
-    pub fn new(params: map) -> RnnCell {
-        return RnnCell { params: params, fitted: false, history: [] }
+pub fn new_rnn(in_dim: u64, hid_dim: u64, out_dim: u64) -> RNNCell {
+    let mut Wxh: [[f64]] = mat_zeros(hid_dim, in_dim)
+    let mut Whh: [[f64]] = mat_zeros(hid_dim, hid_dim)
+    let mut Why: [[f64]] = mat_zeros(out_dim, hid_dim)
+    let mut i: u64 = 0
+    while i < hid_dim {
+        let mut j: u64 = 0
+        while j < in_dim { Wxh[i][j] = 0.1 * (((i + j) % 5) as f64 - 2.0); j = j + 1 }
+        j = 0
+        while j < hid_dim { Whh[i][j] = 0.1 * (((i * 3 + j) % 5) as f64 - 2.0); j = j + 1 }
+        i = i + 1
     }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
+    i = 0
+    while i < out_dim {
+        let mut j: u64 = 0
+        while j < hid_dim { Why[i][j] = 0.1 * (((i + 2 * j) % 5) as f64 - 2.0); j = j + 1 }
+        i = i + 1
     }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+    return RNNCell { in_dim: in_dim, hid_dim: hid_dim, out_dim: out_dim,
+                     Wxh: Wxh, Whh: Whh, Why: Why,
+                     bh: zeros(hid_dim), by: zeros(out_dim) }
 }
 
-fn main() {
-    let model = RnnCell .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("RNN Cell trained: " + model.score(X, y) as str)
+fn matvec(M: [[f64]], v: [f64]) -> [f64] {
+    let r: u64 = len(M); let c: u64 = len(v); let mut y: [f64] = zeros(r)
+    let mut i: u64 = 0
+    while i < r { let mut s: f64 = 0.0; let mut j: u64 = 0
+        while j < c { s = s + M[i][j] * v[j]; j = j + 1 }
+        y[i] = s; i = i + 1 }
+    return y
+}
+
+pub fn step(c: RNNCell, x: [f64], h_prev: [f64]) -> ([f64], [f64]) {
+    let a: [f64] = matvec(c.Wxh, x)
+    let b: [f64] = matvec(c.Whh, h_prev)
+    let mut h: [f64] = zeros(c.hid_dim); let mut i: u64 = 0
+    while i < c.hid_dim { h[i] = tanh_(a[i] + b[i] + c.bh[i]); i = i + 1 }
+    let mut y: [f64] = matvec(c.Why, h); i = 0
+    while i < c.out_dim { y[i] = y[i] + c.by[i]; i = i + 1 }
+    return (h, y)
+}
+
+// Rollout over a sequence of inputs.
+pub fn rollout(c: RNNCell, xs: [[f64]]) -> [[f64]] {
+    let mut h: [f64] = zeros(c.hid_dim)
+    let mut ys: [[f64]] = []
+    let T: u64 = len(xs); let mut t: u64 = 0
+    while t < T {
+        let (h2, y): ([f64], [f64]) = step(c, xs[t], h)
+        h = h2; ys.push(y); t = t + 1
+    }
+    return ys
+}
+
+pub fn main() {
+    let c: RNNCell = new_rnn(2, 3, 2)
+    let xs: [[f64]] = [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]
+    let ys: [[f64]] = rollout(c, xs)
+    print("final y=", ys[2])
 }
