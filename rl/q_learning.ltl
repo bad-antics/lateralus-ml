@@ -1,46 +1,88 @@
-// Q-Learning
+// Q-Learning — off-policy temporal-difference control (Watkins 1989).
+//
+//   Q(s, a) ← Q(s, a) + α·[ r + γ·max_{a'} Q(s', a') − Q(s, a) ]
+//
+// "Off-policy" because the update uses the greedy bootstrap
+// max_{a'} Q(s', a') regardless of which action the behavior policy
+// actually took. With suitable α_t schedule and exploration (ε-greedy),
+// Q converges to Q* almost surely (Tsitsiklis 1994) for finite MDPs.
+//
+// Tabular version here; the same target rule scales to deep RL (DQN,
+// Mnih et al. 2015) by replacing the table with a neural-net and
+// adding a replay buffer + target network.
+
 module ml.rl.q_learning
 
-pub struct QLearning {
-    params: map
-    fitted: bool
-    history: list
+struct Rng { state: u64 }
+fn rng_new(seed: u64) -> Rng { return Rng { state: if seed == 0 { 1u64 } else { seed } } }
+fn rng_next(r: &mut Rng) -> u64 { let mut s = r.state; s ^= s >> 12; s ^= s << 25; s ^= s >> 27; r.state = s; return s * 2685821657736338717u64 }
+fn rng_f(r: &mut Rng) -> float { return ((rng_next(r) >> 11) as float) / 9007199254740992.0 }
+fn rng_range(r: &mut Rng, n: int) -> int { return (rng_next(r) as int % n + n) % n }
+
+pub struct QTable { pub n_states: int, pub n_actions: int, pub q: [[float]] }
+
+pub fn new_table(n_states: int, n_actions: int) -> QTable {
+    let mut q: [[float]] = []
+    let mut i = 0
+    while i < n_states {
+        let mut row: [float] = []
+        let mut j = 0
+        while j < n_actions { row.push(0.0); j += 1 }
+        q.push(row); i += 1
+    }
+    return QTable { n_states: n_states, n_actions: n_actions, q: q }
 }
 
-impl QLearning {
-    pub fn new(params: map) -> QLearning {
-        return QLearning { params: params, fitted: false, history: [] }
+pub fn greedy(qt: QTable, s: int) -> int {
+    let mut best = 0
+    let mut i = 1
+    while i < qt.n_actions { if qt.q[s][i] > qt.q[s][best] { best = i }; i += 1 }
+    return best
+}
+
+pub fn epsilon_greedy(qt: QTable, s: int, epsilon: float, rng: &mut Rng) -> int {
+    if rng_f(rng) < epsilon { return rng_range(rng, qt.n_actions) }
+    return greedy(qt, s)
+}
+
+/// One SARS' update: Q(s, a) ← Q(s, a) + α (r + γ·max Q(s', ·) − Q(s, a))
+pub fn update(qt: &mut QTable, s: int, a: int, r: float, s2: int,
+              terminal: bool, alpha: float, gamma: float) -> () {
+    let mut target = r
+    if !terminal {
+        let best = greedy(*qt, s2)
+        target += gamma * qt.q[s2][best]
     }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+    let td = target - qt.q[s][a]
+    qt.q[s][a] = qt.q[s][a] + alpha * td
 }
 
 fn main() {
-    let model = QLearning .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Q-Learning trained: " + model.score(X, y) as str)
+    // 5-state chain world: actions 0=left, 1=right; reward +1 for
+    // reaching state 4, else 0. Optimal policy: always take "right".
+    let mut qt = new_table(5, 2)
+    let mut rng = rng_new(42u64)
+    let alpha = 0.5; let gamma = 0.9
+    let mut ep = 0
+    while ep < 500 {
+        let mut s = 0
+        let mut steps = 0
+        while steps < 50 {
+            let a = epsilon_greedy(qt, s, 0.1, &mut rng)
+            let s2 = if a == 1 { if s + 1 >= 5 { 4 } else { s + 1 } } else { if s == 0 { 0 } else { s - 1 } }
+            let r = if s2 == 4 && s != 4 { 1.0 } else { 0.0 }
+            let term = s2 == 4
+            update(&mut qt, s, a, r, s2, term, alpha, gamma)
+            if term { break }
+            s = s2
+            steps += 1
+        }
+        ep += 1
+    }
+    let mut i = 0
+    while i < 4 {
+        println("state " + i as str + ": greedy → " + greedy(qt, i) as str + " (want 1)")
+        i += 1
+    }
+    println("Q(3, right) > Q(3, left): " + qt.q[3][1] as str + " vs " + qt.q[3][0] as str)
 }
