@@ -1,46 +1,196 @@
-// Feature Selection
+// Feature selection — filter methods.
+//
+// Variance Threshold:
+//   Drop features whose variance < threshold. Constant columns
+//   (variance = 0) are always removed.
+//
+// ANOVA F-test (regression / classification):
+//   F = MSB / MSW   where MSB = between-group var, MSW = within-group var
+//   Large F → feature means differ across classes → informative.
+//
+// Chi-squared (χ²) test for non-negative features (typically counts):
+//     χ² = Σ (O − E)² / E         O observed, E expected under independence
+//
+// Mutual Information:
+//   I(X, Y) = Σ p(x, y) · log(p(x, y) / (p(x)·p(y)))       non-linear;
+//   captures any dependency, unlike correlation. Not implemented here
+//   (requires density estimation).
+//
+// Workflow: filter → embedded (L1 / tree importance) → wrapper (RFE).
+
 module ml.preprocessing.feature_select
 
-pub struct FeatureSelect {
-    params: map
-    fitted: bool
-    history: list
+fn abs_f(x: float) -> float { return if x < 0.0 { -x } else { x } }
+
+pub fn variances(x: [[float]]) -> [float] {
+    let n = x.len(); let p = x[0].len()
+    let mut vars: [float] = []
+    let mut j = 0
+    while j < p {
+        let mut s = 0.0; let mut i = 0
+        while i < n { s += x[i][j]; i += 1 }
+        let m = s / (n as float)
+        let mut v = 0.0
+        i = 0
+        while i < n { let d = x[i][j] - m; v += d * d; i += 1 }
+        vars.push(v / (n as float))
+        j += 1
+    }
+    return vars
 }
 
-impl FeatureSelect {
-    pub fn new(params: map) -> FeatureSelect {
-        return FeatureSelect { params: params, fitted: false, history: [] }
+pub fn variance_threshold(x: [[float]], threshold: float) -> [int] {
+    let v = variances(x)
+    let mut keep: [int] = []
+    let mut j = 0
+    while j < v.len() { if v[j] > threshold { keep.push(j) }; j += 1 }
+    return keep
+}
+
+/// ANOVA F-statistic for each feature vs categorical target.
+pub fn f_classif(x: [[float]], y: [int]) -> [float] {
+    let n = x.len(); let p = x[0].len()
+    // Unique classes
+    let mut classes: [int] = []
+    let mut i = 0
+    while i < n {
+        let mut found = false
+        let mut k = 0
+        while k < classes.len() { if classes[k] == y[i] { found = true; break }; k += 1 }
+        if !found { classes.push(y[i]) }
+        i += 1
     }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
+    let k_ = classes.len()
+    let mut scores: [float] = []
+    let mut j = 0
+    while j < p {
+        let mut overall = 0.0
+        i = 0
+        while i < n { overall += x[i][j]; i += 1 }
+        overall = overall / (n as float)
+        // SSB = Σ n_c (m_c − m)²
+        let mut ssb = 0.0; let mut ssw = 0.0
+        let mut c = 0
+        while c < k_ {
+            let mut sum_c = 0.0; let mut n_c = 0
+            i = 0
+            while i < n { if y[i] == classes[c] { sum_c += x[i][j]; n_c += 1 }; i += 1 }
+            let m_c = sum_c / (n_c as float)
+            let d = m_c - overall
+            ssb += (n_c as float) * d * d
+            i = 0
+            while i < n {
+                if y[i] == classes[c] {
+                    let dd = x[i][j] - m_c
+                    ssw += dd * dd
+                }
+                i += 1
+            }
+            c += 1
         }
-        return predictions
+        let df_between = (k_ - 1) as float
+        let df_within  = (n - k_) as float
+        let msb = if df_between > 0.0 { ssb / df_between } else { 0.0 }
+        let msw = if df_within  > 0.0 { ssw / df_within  } else { 1.0 }
+        scores.push(if msw > 0.0 { msb / msw } else { 0.0 })
+        j += 1
     }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
+    return scores
+}
+
+/// χ² statistic for non-negative features vs categorical target.
+pub fn chi2(x: [[float]], y: [int]) -> [float] {
+    let n = x.len(); let p = x[0].len()
+    let mut classes: [int] = []
+    let mut i = 0
+    while i < n {
+        let mut found = false
+        let mut k = 0
+        while k < classes.len() { if classes[k] == y[i] { found = true; break }; k += 1 }
+        if !found { classes.push(y[i]) }
+        i += 1
+    }
+    // Class totals
+    let mut class_sum: [float] = []
+    let mut c = 0
+    while c < classes.len() {
+        let mut s = 0.0
+        i = 0
+        while i < n {
+            if y[i] == classes[c] {
+                let mut jj = 0
+                while jj < p { s += x[i][jj]; jj += 1 }
+            }
             i += 1
         }
-        return correct as float / len(y) as float
+        class_sum.push(s); c += 1
     }
+    let mut feat_sum: [float] = []
+    let mut j = 0
+    while j < p {
+        let mut s = 0.0
+        i = 0
+        while i < n { s += x[i][j]; i += 1 }
+        feat_sum.push(s); j += 1
+    }
+    let mut grand = 0.0
+    j = 0
+    while j < p { grand += feat_sum[j]; j += 1 }
+    // Per-feature χ² summed across classes
+    let mut scores: [float] = []
+    j = 0
+    while j < p {
+        let mut chi = 0.0
+        c = 0
+        while c < classes.len() {
+            let mut observed = 0.0
+            i = 0
+            while i < n {
+                if y[i] == classes[c] { observed += x[i][j] }
+                i += 1
+            }
+            let expected = (class_sum[c] * feat_sum[j]) / grand
+            if expected > 0.0 {
+                let d = observed - expected
+                chi += d * d / expected
+            }
+            c += 1
+        }
+        scores.push(chi); j += 1
+    }
+    return scores
+}
+
+/// Pick indices of top-k by score (descending).
+pub fn top_k(scores: [float], k: int) -> [int] {
+    let mut idx: [int] = []
+    let mut i = 0
+    while i < scores.len() { idx.push(i); i += 1 }
+    // Partial selection
+    let mut s = 0
+    while s < k && s < scores.len() {
+        let mut best = s
+        let mut j = s + 1
+        while j < idx.len() { if scores[idx[j]] > scores[idx[best]] { best = j }; j += 1 }
+        if best != s { let t = idx[s]; idx[s] = idx[best]; idx[best] = t }
+        s += 1
+    }
+    let mut out: [int] = []
+    s = 0
+    while s < k && s < idx.len() { out.push(idx[s]); s += 1 }
+    return out
 }
 
 fn main() {
-    let model = FeatureSelect .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Feature Selection trained: " + model.score(X, y) as str)
+    // Feature 0 is informative; feature 1 is constant; feature 2 is noise.
+    let x = [[1.0, 5.0, 0.4], [1.1, 5.0, 0.9], [1.0, 5.0, 0.2],
+             [5.0, 5.0, 0.7], [5.2, 5.0, 0.3], [4.9, 5.0, 0.8]]
+    let y = [0, 0, 0, 1, 1, 1]
+    println("variances: [" + variances(x)[0] as str + ", " + variances(x)[1] as str + ", " + variances(x)[2] as str + "]")
+    let keep = variance_threshold(x, 0.0)
+    println("keep after var-threshold: " + keep.len() as str)   // 2 (col 1 dropped)
+    let fs = f_classif(x, y)
+    println("F-scores: [" + fs[0] as str + ", " + fs[1] as str + ", " + fs[2] as str + "]")
+    // col 0 should have highest F by large margin
+    println("top-1 feat index: " + top_k(fs, 1)[0] as str)       // 0
 }
