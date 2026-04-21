@@ -1,46 +1,85 @@
-// Support Vector Machine
+// Linear Support Vector Machine — soft-margin via SGD on hinge loss.
+//
+//   min_w  ½·||w||² + C·Σ max(0, 1 − y_i·(wᵀx_i + b))
+//
+// Subgradient descent with learning-rate schedule η_t = 1 / (λ·t)
+// (Pegasos, Shalev-Shwartz et al. 2007):
+//
+//   If y_i·(wᵀx_i + b) < 1:     w ← (1 − η·λ)·w + η·C·y_i·x_i
+//   Else:                        w ← (1 − η·λ)·w
+//
+// For multiclass: one-vs-rest. For non-linear problems use kernel SVM
+// with Gaussian RBF — not implemented here (requires quadratic prog.
+// over n² dual variables).
+
 module ml.supervised.svm_simple
 
-pub struct SvmSimple {
-    params: map
-    fitted: bool
-    history: list
+pub struct Model { pub w: [float], pub b: float }
+
+/// y must be ±1 (not 0/1). Features should be standardized.
+pub fn fit(x: [[float]], y: [int], c: float, n_epochs: int) -> Model {
+    let n = x.len(); let p = x[0].len()
+    let mut w: [float] = []; let mut i = 0
+    while i < p { w.push(0.0); i += 1 }
+    let mut b = 0.0
+    let lam = 1.0 / c
+    let mut t: float = 1.0
+    let mut epoch = 0
+    while epoch < n_epochs {
+        let mut j = 0
+        while j < n {
+            let eta = 1.0 / (lam * t)
+            let mut z = b
+            let mut k = 0
+            while k < p { z += w[k] * x[j][k]; k += 1 }
+            let yj = y[j] as float
+            if yj * z < 1.0 {
+                k = 0
+                while k < p { w[k] = (1.0 - eta * lam) * w[k] + eta * yj * x[j][k]; k += 1 }
+                b += eta * yj
+            } else {
+                k = 0
+                while k < p { w[k] = (1.0 - eta * lam) * w[k]; k += 1 }
+            }
+            t += 1.0
+            j += 1
+        }
+        epoch += 1
+    }
+    return Model { w: w, b: b }
 }
 
-impl SvmSimple {
-    pub fn new(params: map) -> SvmSimple {
-        return SvmSimple { params: params, fitted: false, history: [] }
+pub fn decision_function(m: Model, x: [float]) -> float {
+    let mut z = m.b
+    let mut i = 0
+    while i < x.len() { z += m.w[i] * x[i]; i += 1 }
+    return z
+}
+
+pub fn predict(m: Model, x: [float]) -> int {
+    return if decision_function(m, x) >= 0.0 { 1 } else { -1 }
+}
+
+/// Mean hinge loss.
+pub fn hinge_loss(m: Model, x: [[float]], y: [int]) -> float {
+    let n = x.len(); let mut s = 0.0
+    let mut i = 0
+    while i < n {
+        let margin = (y[i] as float) * decision_function(m, x[i])
+        let loss = if margin < 1.0 { 1.0 - margin } else { 0.0 }
+        s += loss
+        i += 1
     }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+    return s / (n as float)
 }
 
 fn main() {
-    let model = SvmSimple .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Support Vector Machine trained: " + model.score(X, y) as str)
+    let x = [[1.0, 1.0], [2.0, 1.0], [1.0, 2.0], [2.0, 2.0],
+             [6.0, 6.0], [7.0, 6.0], [6.0, 7.0], [7.0, 7.0]]
+    let y = [-1, -1, -1, -1, 1, 1, 1, 1]
+    let m = fit(x, y, 1.0, 200)
+    println("w = [" + m.w[0] as str + ", " + m.w[1] as str + "]  b = " + m.b as str)
+    println("pred(1.5, 1.5) = -1: " + predict(m, [1.5, 1.5]) as str)
+    println("pred(6.5, 6.5) = 1:  " + predict(m, [6.5, 6.5]) as str)
+    println("hinge = " + hinge_loss(m, x, y) as str)
 }
