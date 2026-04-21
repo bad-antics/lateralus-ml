@@ -1,46 +1,123 @@
-// k-Means Clustering
+// k-means clustering (Lloyd 1957, MacQueen 1967) with k-means++ init
+// (Arthur & Vassilvitskii 2007).
+//
+// Minimizes within-cluster sum of squares (inertia):
+//
+//     J = Σ_{i=1}^{n} ||x_i − μ_{c(i)}||²
+//
+// Lloyd's algorithm (EM for hard-assignment Gaussian mixture with
+// identity covariance):
+//   1. Assign each point to nearest centroid
+//   2. Recompute each centroid as the mean of its members
+//   3. Repeat until assignments stop changing (or max_iters hit)
+//
+// k-means++ selects initial centroids with probability proportional
+// to squared distance from the nearest chosen centroid — provably
+// O(log k)-competitive with the optimum.
+
 module ml.unsupervised.kmeans
 
-pub struct Kmeans {
-    params: map
-    fitted: bool
-    history: list
+pub struct Result { pub centroids: [[float]], pub labels: [int], pub inertia: float }
+
+struct Rng { state: u64 }
+fn rng_new(seed: u64) -> Rng { return Rng { state: if seed == 0 { 0xDEADBEEFu64 } else { seed } } }
+fn rng_next(r: &mut Rng) -> u64 { let mut s = r.state; s ^= s >> 12; s ^= s << 25; s ^= s >> 27; r.state = s; return s * 2685821657736338717u64 }
+fn rng_f(r: &mut Rng) -> float { return ((rng_next(r) >> 11) as float) / 9007199254740992.0 }
+fn rng_range(r: &mut Rng, n: int) -> int { return (rng_next(r) as int % n + n) % n }
+
+fn sq_dist(a: [float], b: [float]) -> float {
+    let mut s = 0.0; let mut i = 0
+    while i < a.len() { let d = a[i] - b[i]; s += d * d; i += 1 }
+    return s
 }
 
-impl Kmeans {
-    pub fn new(params: map) -> Kmeans {
-        return Kmeans { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
+fn init_pp(x: [[float]], k: int, rng: &mut Rng) -> [[float]] {
+    let n = x.len()
+    let mut centers: [[float]] = []
+    centers.push(x[rng_range(rng, n)].clone())
+    let mut c = 1
+    while c < k {
+        // D²-weighted sampling
+        let mut d2: [float] = []; let mut total = 0.0
         let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
+        while i < n {
+            let mut best = 1e300
+            let mut j = 0
+            while j < centers.len() { let d = sq_dist(x[i], centers[j]); if d < best { best = d }; j += 1 }
+            d2.push(best); total += best
             i += 1
         }
-        return correct as float / len(y) as float
+        let u = rng_f(rng) * total
+        let mut cum = 0.0; let mut pick = 0
+        i = 0
+        while i < n { cum += d2[i]; if cum >= u { pick = i; break }; i += 1 }
+        centers.push(x[pick].clone())
+        c += 1
     }
+    return centers
+}
+
+pub fn fit(x: [[float]], k: int, max_iters: int, seed: u64) -> Result {
+    let n = x.len(); let p = x[0].len()
+    let mut rng = rng_new(seed)
+    let mut centers = init_pp(x, k, &mut rng)
+    let mut labels: [int] = []
+    let mut i = 0
+    while i < n { labels.push(0); i += 1 }
+    let mut it = 0
+    while it < max_iters {
+        // Assignment step
+        let mut changed = false
+        i = 0
+        while i < n {
+            let mut best = 0; let mut best_d = sq_dist(x[i], centers[0])
+            let mut j = 1
+            while j < k { let d = sq_dist(x[i], centers[j]); if d < best_d { best_d = d; best = j }; j += 1 }
+            if labels[i] != best { changed = true; labels[i] = best }
+            i += 1
+        }
+        if !changed && it > 0 { break }
+        // Update step
+        let mut new_centers: [[float]] = []
+        let mut counts: [int] = []
+        let mut c = 0
+        while c < k {
+            let mut row: [float] = []
+            let mut q = 0
+            while q < p { row.push(0.0); q += 1 }
+            new_centers.push(row); counts.push(0); c += 1
+        }
+        i = 0
+        while i < n {
+            let c = labels[i]
+            let mut q = 0
+            while q < p { new_centers[c][q] += x[i][q]; q += 1 }
+            counts[c] += 1
+            i += 1
+        }
+        c = 0
+        while c < k {
+            if counts[c] > 0 {
+                let mut q = 0
+                while q < p { new_centers[c][q] = new_centers[c][q] / (counts[c] as float); q += 1 }
+            } else { new_centers[c] = centers[c].clone() }
+            c += 1
+        }
+        centers = new_centers
+        it += 1
+    }
+    // Inertia
+    let mut J = 0.0
+    i = 0
+    while i < n { J += sq_dist(x[i], centers[labels[i]]); i += 1 }
+    return Result { centroids: centers, labels: labels, inertia: J }
 }
 
 fn main() {
-    let model = Kmeans .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("k-Means Clustering trained: " + model.score(X, y) as str)
+    let x = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0],
+             [10.0, 10.0], [10.0, 11.0], [11.0, 10.0], [11.0, 11.0],
+             [-5.0, -5.0], [-4.0, -5.0], [-5.0, -4.0], [-4.0, -4.0]]
+    let r = fit(x, 3, 100, 7u64)
+    println("inertia = " + r.inertia as str)
+    println("c0 = [" + r.centroids[0][0] as str + ", " + r.centroids[0][1] as str + "]")
 }
