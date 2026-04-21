@@ -1,46 +1,86 @@
-// Convolutional Layer
-module ml.neural_nets.conv_layer
+// neural_nets/conv_layer.ltl
+// 2D convolution with stride + zero padding.
+// Y[c_out, y, x] = sum_{c_in, ky, kx} W[c_out, c_in, ky, kx] * X[c_in, y*s+ky-p, x*s+kx-p] + b[c_out].
+// Output size: out = (in + 2p - k) / s + 1. Refs: LeCun 1989; Goodfellow ch. 9.
 
-pub struct ConvLayer {
-    params: map
-    fitted: bool
-    history: list
+module neural_nets.conv_layer
+
+pub struct Conv2D {
+    c_in: u64, c_out: u64, k: u64, stride: u64, pad: u64,
+    W: [[[[f64]]]],   // [c_out][c_in][k][k]
+    b: [f64],
 }
 
-impl ConvLayer {
-    pub fn new(params: map) -> ConvLayer {
-        return ConvLayer { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
+pub fn new_conv(c_in: u64, c_out: u64, k: u64, stride: u64, pad: u64) -> Conv2D {
+    let mut W: [[[[f64]]]] = []
+    let mut o: u64 = 0
+    while o < c_out {
+        let mut chs: [[[f64]]] = []
+        let mut i: u64 = 0
+        while i < c_in {
+            let mut M: [[f64]] = mat_zeros(k, k)
+            let mut y: u64 = 0
+            while y < k {
+                let mut x: u64 = 0
+                while x < k {
+                    M[y][x] = 0.01 * ((o + i + y + x) as f64)
+                    x = x + 1
+                }
+                y = y + 1
+            }
+            chs.push(M); i = i + 1
         }
-        return predictions
+        W.push(chs); o = o + 1
     }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+    return Conv2D { c_in: c_in, c_out: c_out, k: k, stride: stride, pad: pad,
+                    W: W, b: zeros(c_out) }
 }
 
-fn main() {
-    let model = ConvLayer .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Convolutional Layer trained: " + model.score(X, y) as str)
+pub fn forward(layer: Conv2D, X: [[[f64]]]) -> [[[f64]]] {
+    let h_in: u64 = len(X[0]); let w_in: u64 = len(X[0][0])
+    let h_out: u64 = (h_in + 2 * layer.pad - layer.k) / layer.stride + 1
+    let w_out: u64 = (w_in + 2 * layer.pad - layer.k) / layer.stride + 1
+    let mut Y: [[[f64]]] = []
+    let mut o: u64 = 0
+    while o < layer.c_out {
+        let mut plane: [[f64]] = mat_zeros(h_out, w_out)
+        let mut y: u64 = 0
+        while y < h_out {
+            let mut x: u64 = 0
+            while x < w_out {
+                let mut s: f64 = layer.b[o]
+                let mut c: u64 = 0
+                while c < layer.c_in {
+                    let mut ky: u64 = 0
+                    while ky < layer.k {
+                        let mut kx: u64 = 0
+                        while kx < layer.k {
+                            let iy: i64 = (y * layer.stride) as i64 + ky as i64 - layer.pad as i64
+                            let ix: i64 = (x * layer.stride) as i64 + kx as i64 - layer.pad as i64
+                            if iy >= 0 && iy < h_in as i64 && ix >= 0 && ix < w_in as i64 {
+                                s = s + layer.W[o][c][ky][kx] * X[c][iy as u64][ix as u64]
+                            }
+                            kx = kx + 1
+                        }
+                        ky = ky + 1
+                    }
+                    c = c + 1
+                }
+                plane[y][x] = s
+                x = x + 1
+            }
+            y = y + 1
+        }
+        Y.push(plane)
+        o = o + 1
+    }
+    return Y
+}
+
+pub fn main() {
+    let X: [[[f64]]] = [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]]
+    let layer: Conv2D = new_conv(1, 1, 3, 1, 0)
+    let Y: [[[f64]]] = forward(layer, X)
+    print("Y shape: ", len(Y), " x ", len(Y[0]), " x ", len(Y[0][0]))
+    print("Y[0][0][0]=", Y[0][0][0])
 }
