@@ -1,46 +1,173 @@
-// Isolation Forest
+// Isolation Forest — anomaly detection (Liu, Ting, Zhou 2008).
+//
+// Key insight: anomalies are "few and different" and therefore get
+// isolated by random partitioning in FEWER splits than normal points.
+//
+// Training:
+//   Build t iTrees, each from a sub-sample of size ψ (typ. 256):
+//     At each node, randomly pick a feature and a random split
+//     between min and max of that feature in the current partition.
+//     Recurse until depth limit ceil(log₂ ψ) or node has ≤ 1 point.
+//
+// Scoring:
+//   For a query x, average path length h(x) across all trees.
+//
+//     s(x, n) = 2^( −E[h(x)] / c(n) )
+//
+//   where c(n) = 2·H(n−1) − 2(n−1)/n  and H(k) ≈ ln(k) + 0.5772...
+//
+//   Score interpretation:
+//     s → 1: definitely anomaly
+//     s ≈ 0.5: likely normal
+//     s < 0.5: very likely normal
+//
+// O(t·ψ·log ψ) training; O(t·log ψ) query. No distance metric needed.
+
 module ml.unsupervised.isolation_forest
 
-pub struct IsolationForest {
-    params: map
-    fitted: bool
-    history: list
+pub struct Node {
+    pub is_leaf: bool,
+    pub size: int,
+    pub feature: int,
+    pub split_value: float,
+    pub left: int,
+    pub right: int,
+}
+pub struct Tree { pub nodes: [Node] }
+pub struct Forest { pub trees: [Tree], pub sample_size: int }
+
+struct Rng { state: u64 }
+fn rng_new(seed: u64) -> Rng { return Rng { state: if seed == 0 { 1u64 } else { seed } } }
+fn rng_next(r: &mut Rng) -> u64 { let mut s = r.state; s ^= s >> 12; s ^= s << 25; s ^= s >> 27; r.state = s; return s * 2685821657736338717u64 }
+fn rng_f(r: &mut Rng) -> float { return ((rng_next(r) >> 11) as float) / 9007199254740992.0 }
+fn rng_range(r: &mut Rng, n: int) -> int { return (rng_next(r) as int % n + n) % n }
+
+fn ln(x: float) -> float {
+    let ln2 = 0.6931471805599453; let mut m = x; let mut k = 0.0
+    while m >= 2.0 { m = m / 2.0; k += 1.0 }
+    while m < 1.0  { m = m * 2.0; k -= 1.0 }
+    let u = (m - 1.0) / (m + 1.0); let u2 = u * u
+    let mut term = u; let mut sum = 0.0; let mut n = 1
+    while n < 30 { sum += term / (n as float); term = term * u2; n += 2 }
+    return k * ln2 + 2.0 * sum
+}
+fn log2_int(x: int) -> int {
+    let mut v = x; let mut r = 0
+    while v > 1 { v = v / 2; r += 1 }
+    return r
+}
+fn c_factor(n: int) -> float {
+    if n <= 1 { return 0.0 }
+    let euler = 0.5772156649015329
+    let hn = ln((n - 1) as float) + euler
+    return 2.0 * hn - 2.0 * ((n - 1) as float) / (n as float)
 }
 
-impl IsolationForest {
-    pub fn new(params: map) -> IsolationForest {
-        return IsolationForest { params: params, fitted: false, history: [] }
+fn build_tree(x: [[float]], indices: [int], depth: int, max_depth: int,
+              rng: &mut Rng, nodes: &mut [Node]) -> int {
+    let id = nodes.len() as int
+    if depth >= max_depth || indices.len() <= 1 {
+        nodes.push(Node { is_leaf: true, size: indices.len() as int,
+                          feature: -1, split_value: 0.0, left: -1, right: -1 })
+        return id
     }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
+    let p = x[0].len()
+    let feat = rng_range(rng, p)
+    // Find min/max among these indices.
+    let mut vmin = x[indices[0]][feat]; let mut vmax = vmin
+    let mut i = 1
+    while i < indices.len() {
+        let v = x[indices[i]][feat]
+        if v < vmin { vmin = v }
+        if v > vmax { vmax = v }
+        i += 1
     }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
+    if vmin == vmax {
+        nodes.push(Node { is_leaf: true, size: indices.len() as int,
+                          feature: -1, split_value: 0.0, left: -1, right: -1 })
+        return id
     }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
+    let split = vmin + rng_f(rng) * (vmax - vmin)
+    let mut li: [int] = []; let mut ri: [int] = []
+    i = 0
+    while i < indices.len() {
+        if x[indices[i]][feat] < split { li.push(indices[i]) } else { ri.push(indices[i]) }
+        i += 1
+    }
+    nodes.push(Node { is_leaf: false, size: 0, feature: feat,
+                      split_value: split, left: -1, right: -1 })
+    let l = build_tree(x, li, depth + 1, max_depth, rng, nodes)
+    let r = build_tree(x, ri, depth + 1, max_depth, rng, nodes)
+    nodes[id as int].left = l
+    nodes[id as int].right = r
+    return id
+}
+
+pub fn fit(x: [[float]], n_trees: int, sample_size: int, seed: u64) -> Forest {
+    let mut rng = rng_new(seed)
+    let max_depth = log2_int(sample_size)
+    let n = x.len()
+    let mut trees: [Tree] = []
+    let mut t = 0
+    while t < n_trees {
+        let mut indices: [int] = []
         let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
+        while i < sample_size { indices.push(rng_range(&mut rng, n)); i += 1 }
+        let mut nodes: [Node] = []
+        build_tree(x, indices, 0, max_depth, &mut rng, &mut nodes)
+        trees.push(Tree { nodes: nodes })
+        t += 1
     }
+    return Forest { trees: trees, sample_size: sample_size }
+}
+
+fn path_length(t: Tree, x: [float]) -> float {
+    let mut i = 0; let mut depth = 0.0
+    while true {
+        let n = t.nodes[i]
+        if n.is_leaf { return depth + c_factor(n.size) }
+        i = if x[n.feature] < n.split_value { n.left as int } else { n.right as int }
+        depth += 1.0
+    }
+    return depth
+}
+
+/// Returns anomaly score in (0, 1]. Higher = more anomalous.
+pub fn score(f: Forest, x: [float]) -> float {
+    let t = f.trees.len()
+    let mut total = 0.0
+    let mut i = 0
+    while i < t { total += path_length(f.trees[i], x); i += 1 }
+    let avg = total / (t as float)
+    let c = c_factor(f.sample_size)
+    return pow2(-avg / c)
+}
+
+fn pow2(x: float) -> float {
+    // 2^x = exp(x · ln 2)
+    let ln2 = 0.6931471805599453
+    let y = x * ln2
+    return expf(y)
+}
+fn expf(x: float) -> float {
+    let ln2 = 0.6931471805599453
+    let n = if x >= 0.0 { (x / ln2 + 0.5) as int } else { (x / ln2 - 0.5) as int }
+    let r = x - (n as float) * ln2
+    let mut t = 1.0; let mut s = 1.0; let mut k = 1
+    while k < 25 { t = t * r / (k as float); s += t; k += 1 }
+    let mag = if n < 0 { -n } else { n }
+    let mut p = 1.0; let mut i = 0
+    while i < mag { p = p * 2.0; i += 1 }
+    if n < 0 { p = 1.0 / p }
+    return s * p
 }
 
 fn main() {
-    let model = IsolationForest .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Isolation Forest trained: " + model.score(X, y) as str)
+    // Dense cluster near origin + one clear outlier.
+    let x = [[0.0, 0.0], [0.1, 0.0], [0.0, 0.1], [0.1, 0.1], [-0.1, 0.0],
+             [0.0, -0.1], [0.1, -0.1], [-0.1, 0.1], [0.05, 0.05],
+             [10.0, 10.0]]
+    let f = fit(x, 50, 8, 42u64)
+    println("score normal (0,0):    " + score(f, [0.0, 0.0]) as str)   // ~0.5
+    println("score outlier (10,10): " + score(f, [10.0, 10.0]) as str) // close to 1
 }
