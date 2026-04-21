@@ -1,46 +1,115 @@
-// Text Tokenizer
+// Text tokenizer — split raw strings into tokens (word or character).
+//
+// Normalization pipeline:
+//   1. Lowercase (Unicode-naive; ASCII version here)
+//   2. Strip punctuation and collapse whitespace
+//   3. Optionally remove a given stopword list
+//   4. (Advanced) stemming / lemmatization — not implemented here
+//
+// Output integers via a vocabulary map; unknown tokens map to <UNK>=1;
+// padding token is <PAD>=0.
+//
+// Production NLP uses subword tokenizers (BPE, WordPiece, SentencePiece)
+// to handle OOV (out-of-vocabulary) words gracefully — see the GPT /
+// BERT / T5 tokenizer families.
+
 module ml.preprocessing.tokenizer
 
-pub struct Tokenizer {
-    params: map
-    fitted: bool
-    history: list
+pub const PAD: int = 0
+pub const UNK: int = 1
+
+pub struct Vocab { pub tokens: [str], pub ids: [int] }
+
+fn is_alnum(c: int) -> bool {
+    // ASCII: 0-9, A-Z, a-z
+    return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
 }
 
-impl Tokenizer {
-    pub fn new(params: map) -> Tokenizer {
-        return Tokenizer { params: params, fitted: false, history: [] }
+fn to_lower(c: int) -> int {
+    if c >= 65 && c <= 90 { return c + 32 }
+    return c
+}
+
+/// Split a string into lowercased word tokens. Keeps only [a-z0-9]+ runs.
+pub fn word_tokenize(text: str) -> [str] {
+    let bytes = text.bytes()
+    let mut tokens: [str] = []
+    let mut current: [int] = []
+    let mut i = 0
+    while i < bytes.len() {
+        let c = to_lower(bytes[i] as int)
+        if is_alnum(c) { current.push(c) }
+        else if current.len() > 0 { tokens.push(bytes_to_str(current)); current = [] }
+        i += 1
     }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
+    if current.len() > 0 { tokens.push(bytes_to_str(current)) }
+    return tokens
+}
+
+fn bytes_to_str(b: [int]) -> str {
+    let mut s = ""
+    let mut i = 0
+    while i < b.len() { s = s + char_of(b[i]); i += 1 }
+    return s
+}
+fn char_of(c: int) -> str { return chr(c) }
+
+/// Character tokenizer (useful for small language models / names).
+pub fn char_tokenize(text: str) -> [str] {
+    let bytes = text.bytes()
+    let mut tokens: [str] = []
+    let mut i = 0
+    while i < bytes.len() { tokens.push(char_of(to_lower(bytes[i] as int))); i += 1 }
+    return tokens
+}
+
+/// Build a vocabulary from a corpus; reserve 0=PAD, 1=UNK.
+pub fn build_vocab(corpus: [[str]]) -> [str] {
+    let mut vocab: [str] = ["<pad>", "<unk>"]
+    let mut i = 0
+    while i < corpus.len() {
+        let mut j = 0
+        while j < corpus[i].len() {
+            let tok = corpus[i][j]
+            let mut found = false
+            let mut k = 0
+            while k < vocab.len() { if vocab[k] == tok { found = true; break }; k += 1 }
+            if !found { vocab.push(tok) }
+            j += 1
         }
-        return predictions
+        i += 1
     }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
+    return vocab
+}
+
+pub fn encode(vocab: [str], tokens: [str]) -> [int] {
+    let mut out: [int] = []
+    let mut i = 0
+    while i < tokens.len() {
+        let mut id = UNK
+        let mut j = 0
+        while j < vocab.len() { if vocab[j] == tokens[i] { id = j; break }; j += 1 }
+        out.push(id); i += 1
     }
+    return out
+}
+
+pub fn decode(vocab: [str], ids: [int]) -> [str] {
+    let mut out: [str] = []
+    let mut i = 0
+    while i < ids.len() {
+        out.push(if ids[i] >= 0 && ids[i] < vocab.len() { vocab[ids[i]] } else { "<unk>" })
+        i += 1
+    }
+    return out
 }
 
 fn main() {
-    let model = Tokenizer .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Text Tokenizer trained: " + model.score(X, y) as str)
+    let toks = word_tokenize("Hello, world!  This — is a test 123.")
+    println("tokens: " + toks.len() as str)                       // 6
+    let corpus = [toks]
+    let v = build_vocab(corpus)
+    println("vocab size: " + v.len() as str)                      // 2 reserved + unique tokens
+    let enc = encode(v, ["hello", "world", "xxx"])
+    println("unknown → 1: " + enc[2] as str)
 }
