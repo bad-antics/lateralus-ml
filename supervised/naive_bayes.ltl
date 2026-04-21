@@ -1,46 +1,127 @@
-// Naive Bayes
+// Gaussian Naive Bayes classifier.
+//
+//   P(y=c|x) ∝ P(y=c) · Π_i P(x_i | y=c)
+//
+// Assumes features are conditionally independent given the class and
+// normally distributed:
+//     P(x_i | y=c) = (1 / √(2πσ²_{c,i})) · exp(-(x_i-μ_{c,i})² / (2σ²_{c,i}))
+//
+// Training: per-class mean and variance of each feature — O(n·p).
+// Prediction uses log-probabilities to avoid underflow:
+//
+//   log P(y=c|x) = log P(y=c)
+//                − ½·Σ_i [ log(2π σ²) + (x_i - μ)² / σ² ]  (+ const)
+//
+// Surprisingly strong baseline for text classification (multinomial
+// variant) and used in spam filtering since the 1990s.
+
 module ml.supervised.naive_bayes
 
-pub struct NaiveBayes {
-    params: map
-    fitted: bool
-    history: list
+pub struct Model {
+    pub classes: [int],
+    pub priors: [float],               // len = n_classes
+    pub means:  [[float]],             // n_classes × n_features
+    pub vars:   [[float]],             // n_classes × n_features
 }
 
-impl NaiveBayes {
-    pub fn new(params: map) -> NaiveBayes {
-        return NaiveBayes { params: params, fitted: false, history: [] }
+pub const VAR_SMOOTH: float = 1e-9     // avoid division-by-zero
+
+pub fn fit(x: [[float]], y: [int]) -> Model {
+    let n = x.len(); let p = x[0].len()
+    // Discover unique classes.
+    let mut classes: [int] = []
+    let mut i = 0
+    while i < n {
+        let mut found = false
+        let mut j = 0
+        while j < classes.len() { if classes[j] == y[i] { found = true; break }; j += 1 }
+        if !found { classes.push(y[i]) }
+        i += 1
     }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
+    let nc = classes.len()
+    let mut priors: [float] = []
+    let mut means:  [[float]] = []
+    let mut vars_:  [[float]] = []
+    let mut c = 0
+    while c < nc {
+        let mut mean: [float] = []; let mut count = 0
+        let mut k = 0
+        while k < p { mean.push(0.0); k += 1 }
+        i = 0
+        while i < n {
+            if y[i] == classes[c] {
+                k = 0
+                while k < p { mean[k] += x[i][k]; k += 1 }
+                count += 1
+            }
             i += 1
         }
-        return correct as float / len(y) as float
+        k = 0
+        while k < p { mean[k] = mean[k] / (count as float); k += 1 }
+        let mut var_: [float] = []
+        k = 0
+        while k < p { var_.push(0.0); k += 1 }
+        i = 0
+        while i < n {
+            if y[i] == classes[c] {
+                k = 0
+                while k < p { let d = x[i][k] - mean[k]; var_[k] += d * d; k += 1 }
+            }
+            i += 1
+        }
+        k = 0
+        while k < p { var_[k] = var_[k] / (count as float) + VAR_SMOOTH; k += 1 }
+        priors.push((count as float) / (n as float))
+        means.push(mean)
+        vars_.push(var_)
+        c += 1
     }
+    return Model { classes: classes, priors: priors, means: means, vars: vars_ }
+}
+
+pub fn log_posterior(m: Model, x: [float], c_idx: int) -> float {
+    let log_2pi = 1.8378770664093453
+    let mut lp = ln(m.priors[c_idx])
+    let p = x.len()
+    let mut i = 0
+    while i < p {
+        let v = m.vars[c_idx][i]
+        let d = x[i] - m.means[c_idx][i]
+        lp += -0.5 * (log_2pi + ln(v) + d * d / v)
+        i += 1
+    }
+    return lp
+}
+
+pub fn predict(m: Model, x: [float]) -> int {
+    let nc = m.classes.len()
+    let mut best = 0
+    let mut best_lp = log_posterior(m, x, 0)
+    let mut c = 1
+    while c < nc {
+        let lp = log_posterior(m, x, c)
+        if lp > best_lp { best_lp = lp; best = c }
+        c += 1
+    }
+    return m.classes[best]
+}
+
+fn ln(x: float) -> float {
+    let ln2 = 0.6931471805599453
+    let mut m = x; let mut k = 0.0
+    while m >= 2.0 { m = m / 2.0; k += 1.0 }
+    while m < 1.0  { m = m * 2.0; k -= 1.0 }
+    let u = (m - 1.0) / (m + 1.0); let u2 = u * u
+    let mut term = u; let mut sum = 0.0; let mut n = 1
+    while n < 30 { sum += term / (n as float); term = term * u2; n += 2 }
+    return k * ln2 + 2.0 * sum
 }
 
 fn main() {
-    let model = NaiveBayes .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Naive Bayes trained: " + model.score(X, y) as str)
+    let x = [[1.0, 1.0], [1.0, 2.0], [2.0, 1.0], [2.0, 2.0],
+             [5.0, 5.0], [5.0, 6.0], [6.0, 5.0], [6.0, 6.0]]
+    let y = [0, 0, 0, 0, 1, 1, 1, 1]
+    let m = fit(x, y)
+    println("Pred (1.5, 1.5): " + predict(m, [1.5, 1.5]) as str)   // 0
+    println("Pred (5.5, 5.5): " + predict(m, [5.5, 5.5]) as str)   // 1
 }
