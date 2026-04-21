@@ -1,46 +1,142 @@
-// TF-IDF Vectorizer
+// TF-IDF — Term Frequency × Inverse Document Frequency.
+//
+// For term t, document d, corpus D:
+//
+//   tf(t, d)  = count(t, d) / Σ_w count(w, d)       (or sublinear: 1 + log tf)
+//   idf(t, D) = log( (|D| + 1) / (df(t) + 1) ) + 1   (smoothed; scikit default)
+//   tfidf(t, d) = tf(t, d) · idf(t, D)
+//
+// Rows are typically L2-normalized so cosine similarity between two
+// TF-IDF vectors reduces to a dot product — the classic vector-space
+// model of information retrieval (Salton & McGill 1983).
+//
+// Downweights ubiquitous terms ("the", "of") that appear in every
+// document and boosts rare discriminative ones.
+//
+// Modern baseline replaced largely by dense embeddings (word2vec,
+// BERT) but still dominant for short-text similarity, topic browsing,
+// and as a fast feature for classic classifiers.
+
 module ml.preprocessing.tfidf
 
-pub struct Tfidf {
-    params: map
-    fitted: bool
-    history: list
+pub struct Model {
+    pub vocab: [str],       // ordered vocabulary
+    pub idf: [float],       // per-term IDF, same ordering as vocab
 }
 
-impl Tfidf {
-    pub fn new(params: map) -> Tfidf {
-        return Tfidf { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
-    }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
+fn ln(x: float) -> float {
+    let ln2 = 0.6931471805599453; let mut m = x; let mut k = 0.0
+    while m >= 2.0 { m = m / 2.0; k += 1.0 }
+    while m < 1.0  { m = m * 2.0; k -= 1.0 }
+    let u = (m - 1.0) / (m + 1.0); let u2 = u * u
+    let mut term = u; let mut sum = 0.0; let mut n = 1
+    while n < 30 { sum += term / (n as float); term = term * u2; n += 2 }
+    return k * ln2 + 2.0 * sum
+}
+fn sqrt(x: float) -> float { if x <= 0.0 { return 0.0 }; let mut g = x; let mut i = 0; while i < 40 { g = 0.5 * (g + x / g); i += 1 }; return g }
+
+fn index_in(vocab: [str], tok: str) -> int {
+    let mut i = 0
+    while i < vocab.len() { if vocab[i] == tok { return i }; i += 1 }
+    return -1
+}
+
+pub fn fit(docs: [[str]]) -> Model {
+    // Build vocabulary
+    let mut vocab: [str] = []
+    let mut d = 0
+    while d < docs.len() {
         let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
+        while i < docs[d].len() {
+            if index_in(vocab, docs[d][i]) < 0 { vocab.push(docs[d][i]) }
             i += 1
         }
-        return correct as float / len(y) as float
+        d += 1
     }
+    // Document frequency df[t] = #docs containing t
+    let mut df: [int] = []
+    let mut t = 0
+    while t < vocab.len() { df.push(0); t += 1 }
+    d = 0
+    while d < docs.len() {
+        let mut seen: [int] = []
+        let mut i = 0
+        while i < docs[d].len() {
+            let ti = index_in(vocab, docs[d][i])
+            let mut already = false
+            let mut k = 0
+            while k < seen.len() { if seen[k] == ti { already = true; break }; k += 1 }
+            if !already { seen.push(ti); df[ti] += 1 }
+            i += 1
+        }
+        d += 1
+    }
+    // Smoothed IDF (sklearn default):  ln((n+1)/(df+1)) + 1
+    let n = docs.len() as float
+    let mut idf: [float] = []
+    t = 0
+    while t < vocab.len() {
+        idf.push(ln((n + 1.0) / ((df[t] as float) + 1.0)) + 1.0)
+        t += 1
+    }
+    return Model { vocab: vocab, idf: idf }
+}
+
+/// Transform one document to a TF-IDF vector. Sublinear-TF option.
+pub fn transform(m: Model, doc: [str], sublinear: bool, l2_norm: bool) -> [float] {
+    let V = m.vocab.len()
+    let mut counts: [float] = []
+    let mut i = 0
+    while i < V { counts.push(0.0); i += 1 }
+    i = 0
+    while i < doc.len() {
+        let ti = index_in(m.vocab, doc[i])
+        if ti >= 0 { counts[ti] += 1.0 }
+        i += 1
+    }
+    let mut total = 0.0
+    i = 0
+    while i < V { total += counts[i]; i += 1 }
+    let mut vec: [float] = []
+    i = 0
+    while i < V {
+        let tf = if total > 0.0 { counts[i] / total } else { 0.0 }
+        let tf_val = if sublinear && tf > 0.0 { 1.0 + ln(tf) } else { tf }
+        vec.push(tf_val * m.idf[i])
+        i += 1
+    }
+    if l2_norm {
+        let mut s = 0.0
+        i = 0
+        while i < V { s += vec[i] * vec[i]; i += 1 }
+        let nrm = sqrt(s)
+        if nrm > 0.0 {
+            i = 0
+            while i < V { vec[i] = vec[i] / nrm; i += 1 }
+        }
+    }
+    return vec
+}
+
+pub fn transform_corpus(m: Model, docs: [[str]], sublinear: bool, l2_norm: bool) -> [[float]] {
+    let mut out: [[float]] = []
+    let mut i = 0
+    while i < docs.len() { out.push(transform(m, docs[i], sublinear, l2_norm)); i += 1 }
+    return out
 }
 
 fn main() {
-    let model = Tfidf .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("TF-IDF Vectorizer trained: " + model.score(X, y) as str)
+    let docs = [["the", "cat", "sat"],
+                ["the", "dog", "ran"],
+                ["the", "cat", "ran"]]
+    let m = fit(docs)
+    println("vocab: " + m.vocab.len() as str)       // 5: the cat sat dog ran
+    // "the" appears in all docs → IDF is smallest (near 1.0)
+    let idx_the = 0   // first seen
+    println("idf(the) low: " + m.idf[idx_the] as str)
+    let v = transform(m, docs[0], false, true)
+    let mut s = 0.0
+    let mut i = 0
+    while i < v.len() { s += v[i] * v[i]; i += 1 }
+    println("‖v‖² (L2) ≈ 1: " + s as str)
 }
