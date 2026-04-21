@@ -1,46 +1,155 @@
-// Decision Tree
+// CART decision tree for classification (Breiman et al., 1984).
+//
+// At each node, find the (feature, threshold) pair that minimizes
+// weighted impurity of the two resulting children. Impurity measures:
+//
+//   Gini:    1 − Σ p_c²
+//   Entropy: −Σ p_c · log₂ p_c
+//
+// Gain = I(parent) − (N_L/N · I(L) + N_R/N · I(R))
+//
+// Stopping criteria:
+//   • max_depth reached
+//   • node is pure (one class)
+//   • split does not improve impurity
+//
+// Greedy and only considers univariate axis-aligned splits — hence
+// "CART". The basis of random forest, gradient boosting, XGBoost, etc.
+
 module ml.supervised.decision_tree
 
-pub struct DecisionTree {
-    params: map
-    fitted: bool
-    history: list
+pub struct Node {
+    pub is_leaf: bool,
+    pub prediction: int,
+    pub feature: int,
+    pub threshold: float,
+    pub left: int,       // index into nodes array, -1 if leaf
+    pub right: int,
 }
 
-impl DecisionTree {
-    pub fn new(params: map) -> DecisionTree {
-        return DecisionTree { params: params, fitted: false, history: [] }
+pub struct Tree { pub nodes: [Node] }
+
+fn gini(y: [int]) -> float {
+    let n = y.len()
+    if n == 0 { return 0.0 }
+    // Count labels with linear scan (small label space assumed).
+    let mut labs: [int] = []
+    let mut cnts: [int] = []
+    let mut i = 0
+    while i < n {
+        let mut j = 0; let mut found = false
+        while j < labs.len() { if labs[j] == y[i] { cnts[j] += 1; found = true; break }; j += 1 }
+        if !found { labs.push(y[i]); cnts.push(1) }
+        i += 1
     }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
+    let mut g = 1.0
+    let mut k = 0
+    while k < cnts.len() {
+        let p = (cnts[k] as float) / (n as float)
+        g -= p * p
+        k += 1
     }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
-        }
-        return predictions
+    return g
+}
+
+fn majority(y: [int]) -> int {
+    let mut labs: [int] = []; let mut cnts: [int] = []
+    let mut i = 0
+    while i < y.len() {
+        let mut j = 0; let mut found = false
+        while j < labs.len() { if labs[j] == y[i] { cnts[j] += 1; found = true; break }; j += 1 }
+        if !found { labs.push(y[i]); cnts.push(1) }
+        i += 1
     }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
+    let mut best = 0
+    let mut j = 1
+    while j < cnts.len() { if cnts[j] > cnts[best] { best = j }; j += 1 }
+    return labs[best]
+}
+
+fn best_split(x: [[float]], y: [int]) -> (int, float, float) {
+    let n = x.len(); let p = x[0].len()
+    let g_parent = gini(y)
+    let mut best_gain = 0.0
+    let mut best_feat = -1
+    let mut best_thr = 0.0
+    let mut f = 0
+    while f < p {
+        // Try each unique value as threshold (inefficient but clear).
         let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
+        while i < n {
+            let thr = x[i][f]
+            let mut yl: [int] = []; let mut yr: [int] = []
+            let mut j = 0
+            while j < n {
+                if x[j][f] <= thr { yl.push(y[j]) } else { yr.push(y[j]) }
+                j += 1
+            }
+            if yl.len() == 0 || yr.len() == 0 { i += 1; continue }
+            let gain = g_parent
+                - ((yl.len() as float) / (n as float)) * gini(yl)
+                - ((yr.len() as float) / (n as float)) * gini(yr)
+            if gain > best_gain {
+                best_gain = gain; best_feat = f; best_thr = thr
+            }
             i += 1
         }
-        return correct as float / len(y) as float
+        f += 1
     }
+    return (best_feat, best_thr, best_gain)
+}
+
+fn build(x: [[float]], y: [int], depth: int, max_depth: int, nodes: &mut [Node]) -> int {
+    if depth >= max_depth || gini(y) == 0.0 {
+        let id = nodes.len() as int
+        nodes.push(Node { is_leaf: true, prediction: majority(y), feature: -1, threshold: 0.0, left: -1, right: -1 })
+        return id
+    }
+    let (feat, thr, gain) = best_split(x, y)
+    if feat < 0 || gain <= 0.0 {
+        let id = nodes.len() as int
+        nodes.push(Node { is_leaf: true, prediction: majority(y), feature: -1, threshold: 0.0, left: -1, right: -1 })
+        return id
+    }
+    // Partition
+    let mut xl: [[float]] = []; let mut yl: [int] = []
+    let mut xr: [[float]] = []; let mut yr: [int] = []
+    let mut i = 0
+    while i < x.len() {
+        if x[i][feat] <= thr { xl.push(x[i]); yl.push(y[i]) }
+        else                 { xr.push(x[i]); yr.push(y[i]) }
+        i += 1
+    }
+    let id = nodes.len() as int
+    nodes.push(Node { is_leaf: false, prediction: -1, feature: feat, threshold: thr, left: -1, right: -1 })
+    let left_id = build(xl, yl, depth + 1, max_depth, nodes)
+    let right_id = build(xr, yr, depth + 1, max_depth, nodes)
+    nodes[id as int].left = left_id
+    nodes[id as int].right = right_id
+    return id
+}
+
+pub fn fit(x: [[float]], y: [int], max_depth: int) -> Tree {
+    let mut nodes: [Node] = []
+    build(x, y, 0, max_depth, &mut nodes)
+    return Tree { nodes: nodes }
+}
+
+pub fn predict(t: Tree, x: [float]) -> int {
+    let mut i = 0
+    while true {
+        let n = t.nodes[i]
+        if n.is_leaf { return n.prediction }
+        i = if x[n.feature] <= n.threshold { n.left as int } else { n.right as int }
+    }
+    return -1
 }
 
 fn main() {
-    let model = DecisionTree .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Decision Tree trained: " + model.score(X, y) as str)
+    let x = [[2.0, 3.0], [10.0, 1.0], [3.0, 5.0], [8.0, 2.0], [1.0, 4.0], [9.0, 3.0]]
+    let y = [0, 1, 0, 1, 0, 1]
+    let t = fit(x, y, 3)
+    println("nodes: " + t.nodes.len() as str)
+    println("pred (2, 4) = 0: " + predict(t, [2.0, 4.0]) as str)
+    println("pred (9, 2) = 1: " + predict(t, [9.0, 2.0]) as str)
 }
