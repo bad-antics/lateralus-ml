@@ -1,46 +1,81 @@
-// Pooling Layer
-module ml.neural_nets.pooling_layer
+// neural_nets/pooling_layer.ltl
+// Max-pool and average-pool with stride.
+// Y[c, y, x] = OP_{ky, kx} X[c, y*s+ky, x*s+kx], OP in {max, mean}.
+// Max-pool gradient routes dy back to the argmax index only.
 
-pub struct PoolingLayer {
-    params: map
-    fitted: bool
-    history: list
+module neural_nets.pooling_layer
+
+pub fn max_pool(X: [[[f64]]], k: u64, s: u64) -> ([[[f64]]], [[[u64]]]) {
+    let C: u64 = len(X); let H: u64 = len(X[0]); let W: u64 = len(X[0][0])
+    let h_out: u64 = (H - k) / s + 1; let w_out: u64 = (W - k) / s + 1
+    let mut Y: [[[f64]]] = []; let mut idx: [[[u64]]] = []
+    let mut c: u64 = 0
+    while c < C {
+        let mut plane: [[f64]] = mat_zeros(h_out, w_out)
+        let mut ixplane: [[u64]] = mat_u64_zeros(h_out, w_out)
+        let mut y: u64 = 0
+        while y < h_out {
+            let mut x: u64 = 0
+            while x < w_out {
+                let mut best: f64 = -1.0e308; let mut bi: u64 = 0
+                let mut ky: u64 = 0
+                while ky < k {
+                    let mut kx: u64 = 0
+                    while kx < k {
+                        let v: f64 = X[c][y * s + ky][x * s + kx]
+                        if v > best { best = v; bi = ky * k + kx }
+                        kx = kx + 1
+                    }
+                    ky = ky + 1
+                }
+                plane[y][x] = best; ixplane[y][x] = bi
+                x = x + 1
+            }
+            y = y + 1
+        }
+        Y.push(plane); idx.push(ixplane)
+        c = c + 1
+    }
+    return (Y, idx)
 }
 
-impl PoolingLayer {
-    pub fn new(params: map) -> PoolingLayer {
-        return PoolingLayer { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
+pub fn avg_pool(X: [[[f64]]], k: u64, s: u64) -> [[[f64]]] {
+    let C: u64 = len(X); let H: u64 = len(X[0]); let W: u64 = len(X[0][0])
+    let h_out: u64 = (H - k) / s + 1; let w_out: u64 = (W - k) / s + 1
+    let area: f64 = (k * k) as f64
+    let mut Y: [[[f64]]] = []
+    let mut c: u64 = 0
+    while c < C {
+        let mut plane: [[f64]] = mat_zeros(h_out, w_out)
+        let mut y: u64 = 0
+        while y < h_out {
+            let mut x: u64 = 0
+            while x < w_out {
+                let mut s_acc: f64 = 0.0
+                let mut ky: u64 = 0
+                while ky < k {
+                    let mut kx: u64 = 0
+                    while kx < k { s_acc = s_acc + X[c][y * s + ky][x * s + kx]; kx = kx + 1 }
+                    ky = ky + 1
+                }
+                plane[y][x] = s_acc / area
+                x = x + 1
+            }
+            y = y + 1
         }
-        return predictions
+        Y.push(plane)
+        c = c + 1
     }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
-            i += 1
-        }
-        return correct as float / len(y) as float
-    }
+    return Y
 }
 
-fn main() {
-    let model = PoolingLayer .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Pooling Layer trained: " + model.score(X, y) as str)
+pub fn main() {
+    let X: [[[f64]]] = [[[1.0, 3.0, 2.0, 4.0],
+                        [5.0, 6.0, 1.0, 2.0],
+                        [0.0, 9.0, 8.0, 7.0],
+                        [3.0, 2.0, 1.0, 0.0]]]
+    let (Ym, _ix): ([[[f64]]], [[[u64]]]) = max_pool(X, 2, 2)
+    let Ya: [[[f64]]] = avg_pool(X, 2, 2)
+    print("max=", Ym[0])
+    print("avg=", Ya[0])
 }
