@@ -1,46 +1,141 @@
-// Principal Component Analysis
+// Principal Component Analysis (Pearson 1901; Hotelling 1933).
+//
+// Finds an orthonormal basis along which the variance of the centered
+// data is maximized. Equivalent to the SVD of the centered matrix:
+//
+//     X_c = U·Σ·Vᵀ        PCA components = columns of V
+//                          explained variance = σ²_k / (n−1)
+//
+// Here we implement the power-iteration / deflation approach:
+//   1. Center X.
+//   2. Compute covariance C = (X_cᵀ X_c) / (n − 1)
+//   3. For k = 1..K:
+//        v ← random unit vector
+//        repeat: v ← C·v / ||C·v||        (power iteration on largest eigenval)
+//        λ_k ← vᵀ C v
+//        Deflate: C ← C − λ_k · v vᵀ
+//
+// Uses: dimensionality reduction, visualization, whitening, denoising,
+// compression. Sensitive to feature scaling → standardize first.
+
 module ml.unsupervised.pca
 
-pub struct Pca {
-    params: map
-    fitted: bool
-    history: list
+pub struct Model {
+    pub components: [[float]],         // K × d (each row = eigenvector vᵢ)
+    pub explained_variance: [float],   // K
+    pub mean: [float],                 // d
 }
 
-impl Pca {
-    pub fn new(params: map) -> Pca {
-        return Pca { params: params, fitted: false, history: [] }
+struct Rng { state: u64 }
+fn rng_new(seed: u64) -> Rng { return Rng { state: if seed == 0 { 1u64 } else { seed } } }
+fn rng_next(r: &mut Rng) -> u64 { let mut s = r.state; s ^= s >> 12; s ^= s << 25; s ^= s >> 27; r.state = s; return s * 2685821657736338717u64 }
+fn rng_f(r: &mut Rng) -> float { return ((rng_next(r) >> 11) as float) / 9007199254740992.0 * 2.0 - 1.0 }
+
+fn sqrt(x: float) -> float { if x <= 0.0 { return 0.0 }; let mut g = x; let mut i = 0; while i < 40 { g = 0.5 * (g + x / g); i += 1 }; return g }
+
+fn matvec(a: [[float]], v: [float]) -> [float] {
+    let n = a.len(); let mut r: [float] = []
+    let mut i = 0
+    while i < n {
+        let mut s = 0.0
+        let mut j = 0
+        while j < v.len() { s += a[i][j] * v[j]; j += 1 }
+        r.push(s); i += 1
     }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
+    return r
+}
+fn norm(v: [float]) -> float {
+    let mut s = 0.0; let mut i = 0
+    while i < v.len() { s += v[i] * v[i]; i += 1 }
+    return sqrt(s)
+}
+fn normalize(v: [float]) -> [float] {
+    let nv = norm(v); let mut r: [float] = []
+    let mut i = 0
+    while i < v.len() { r.push(v[i] / nv); i += 1 }
+    return r
+}
+
+pub fn fit(x: [[float]], k: int, seed: u64) -> Model {
+    let n = x.len(); let d = x[0].len()
+    let mut mean: [float] = []
+    let mut j = 0
+    while j < d {
+        let mut s = 0.0; let mut i = 0
+        while i < n { s += x[i][j]; i += 1 }
+        mean.push(s / (n as float)); j += 1
     }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
+    // Covariance matrix  C[i,j] = (1/(n-1)) Σ_k (x_k,i − μ_i)(x_k,j − μ_j)
+    let mut cov: [[float]] = []
+    let mut i = 0
+    while i < d {
+        let mut row: [float] = []
+        j = 0
+        while j < d {
+            let mut s = 0.0; let mut k2 = 0
+            while k2 < n { s += (x[k2][i] - mean[i]) * (x[k2][j] - mean[j]); k2 += 1 }
+            row.push(s / ((n - 1) as float)); j += 1
         }
-        return predictions
+        cov.push(row); i += 1
     }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
-        let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
+    let mut rng = rng_new(seed)
+    let mut components: [[float]] = []
+    let mut explained: [float] = []
+    let mut kk = 0
+    while kk < k {
+        let mut v: [float] = []
+        i = 0
+        while i < d { v.push(rng_f(&mut rng)); i += 1 }
+        v = normalize(v)
+        // Power iteration
+        let mut iter = 0
+        while iter < 200 {
+            let w = matvec(cov, v)
+            let nw = norm(w)
+            if nw < 1e-14 { break }
+            let mut v_new: [float] = []
+            i = 0
+            while i < d { v_new.push(w[i] / nw); i += 1 }
+            v = v_new
+            iter += 1
+        }
+        // Rayleigh quotient for eigenvalue
+        let cv = matvec(cov, v)
+        let mut lam = 0.0
+        i = 0
+        while i < d { lam += v[i] * cv[i]; i += 1 }
+        components.push(v.clone())
+        explained.push(lam)
+        // Deflate: C ← C − λ·v vᵀ
+        i = 0
+        while i < d {
+            j = 0
+            while j < d { cov[i][j] = cov[i][j] - lam * v[i] * v[j]; j += 1 }
             i += 1
         }
-        return correct as float / len(y) as float
+        kk += 1
     }
+    return Model { components: components, explained_variance: explained, mean: mean }
+}
+
+pub fn transform(m: Model, x: [float]) -> [float] {
+    let k = m.components.len()
+    let mut out: [float] = []
+    let mut c = 0
+    while c < k {
+        let mut s = 0.0
+        let mut i = 0
+        while i < x.len() { s += m.components[c][i] * (x[i] - m.mean[i]); i += 1 }
+        out.push(s); c += 1
+    }
+    return out
 }
 
 fn main() {
-    let model = Pca .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("Principal Component Analysis trained: " + model.score(X, y) as str)
+    // 2-D data clearly along the (1, 1) direction.
+    let x = [[0.0, 0.0], [1.0, 1.1], [2.0, 2.1], [3.0, 2.9],
+             [4.0, 4.1], [5.0, 4.9], [6.0, 6.0]]
+    let m = fit(x, 2, 42u64)
+    println("PC1 ≈ (0.707, 0.707): [" + m.components[0][0] as str + ", " + m.components[0][1] as str + "]")
+    println("var(PC1) >> var(PC2): " + m.explained_variance[0] as str + " vs " + m.explained_variance[1] as str)
 }
