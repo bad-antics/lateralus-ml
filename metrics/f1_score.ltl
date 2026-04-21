@@ -1,46 +1,128 @@
-// F1 Score
+// F1-score and its multi-class aggregations.
+//
+//   F1 = 2·P·R / (P + R)          harmonic mean of precision and recall
+//
+// Multi-class averaging strategies (scikit-learn naming):
+//   • micro    : compute TP/FP/FN globally → one F1
+//                equivalent to accuracy for single-label multiclass
+//   • macro    : compute F1 per class, unweighted mean
+//                (treats every class as equally important)
+//   • weighted : F1 per class, weighted by support (frequency)
+//                (handles imbalance but still cares about majority class)
+//
+// In information retrieval (Van Rijsbergen 1979), F1 balances the
+// trade-off when precision and recall have equal cost. For differing
+// costs use F_β with β = cost ratio.
+
 module ml.metrics.f1_score
 
-pub struct F1Score {
-    params: map
-    fitted: bool
-    history: list
+fn precision_for(c: int, y_true: [int], y_pred: [int]) -> float {
+    let mut tp = 0; let mut fp = 0
+    let mut i = 0
+    while i < y_true.len() {
+        if y_pred[i] == c {
+            if y_true[i] == c { tp += 1 } else { fp += 1 }
+        }
+        i += 1
+    }
+    return if tp + fp > 0 { (tp as float) / ((tp + fp) as float) } else { 0.0 }
 }
 
-impl F1Score {
-    pub fn new(params: map) -> F1Score {
-        return F1Score { params: params, fitted: false, history: [] }
-    }
-    pub fn fit(self, X: list, y: list) {
-        let n_samples = len(X)
-        let n_features = if n_samples > 0 { len(X[0]) } else { 0 }
-        self.history = push(self.history, {"epoch": 0, "samples": n_samples, "features": n_features})
-        self.fitted = true
-    }
-    pub fn predict(self, X: list) -> list {
-        if not self.fitted { throw Error("Model not fitted") }
-        let mut predictions = []
-        for x in X {
-            predictions = push(predictions, 0.0)
+fn recall_for(c: int, y_true: [int], y_pred: [int]) -> float {
+    let mut tp = 0; let mut fn_ = 0
+    let mut i = 0
+    while i < y_true.len() {
+        if y_true[i] == c {
+            if y_pred[i] == c { tp += 1 } else { fn_ += 1 }
         }
-        return predictions
+        i += 1
     }
-    pub fn score(self, X: list, y: list) -> float {
-        let preds = self.predict(X)
-        let mut correct = 0
+    return if tp + fn_ > 0 { (tp as float) / ((tp + fn_) as float) } else { 0.0 }
+}
+
+fn support_for(c: int, y_true: [int]) -> int {
+    let mut s = 0; let mut i = 0
+    while i < y_true.len() { if y_true[i] == c { s += 1 }; i += 1 }
+    return s
+}
+
+pub fn f1(p: float, r: float) -> float {
+    if p + r <= 0.0 { return 0.0 }
+    return 2.0 * p * r / (p + r)
+}
+
+pub fn f1_binary(y_true: [int], y_pred: [int]) -> float {
+    let p = precision_for(1, y_true, y_pred)
+    let r = recall_for(1, y_true, y_pred)
+    return f1(p, r)
+}
+
+fn unique(y: [int]) -> [int] {
+    let mut out: [int] = []
+    let mut i = 0
+    while i < y.len() {
+        let mut found = false
+        let mut j = 0
+        while j < out.len() { if out[j] == y[i] { found = true; break }; j += 1 }
+        if !found { out.push(y[i]) }
+        i += 1
+    }
+    return out
+}
+
+pub fn f1_macro(y_true: [int], y_pred: [int]) -> float {
+    let classes = unique(y_true)
+    let mut s = 0.0
+    let mut i = 0
+    while i < classes.len() {
+        let c = classes[i]
+        s += f1(precision_for(c, y_true, y_pred), recall_for(c, y_true, y_pred))
+        i += 1
+    }
+    return s / (classes.len() as float)
+}
+
+pub fn f1_weighted(y_true: [int], y_pred: [int]) -> float {
+    let classes = unique(y_true)
+    let n = y_true.len()
+    let mut s = 0.0
+    let mut i = 0
+    while i < classes.len() {
+        let c = classes[i]
+        let w = (support_for(c, y_true) as float) / (n as float)
+        s += w * f1(precision_for(c, y_true, y_pred), recall_for(c, y_true, y_pred))
+        i += 1
+    }
+    return s
+}
+
+/// Micro-F1: pool TP/FP/FN across all classes before computing F1.
+pub fn f1_micro(y_true: [int], y_pred: [int]) -> float {
+    let mut tp_total = 0; let mut fp_total = 0; let mut fn_total = 0
+    let classes = unique(y_true)
+    let mut k = 0
+    while k < classes.len() {
+        let c = classes[k]
         let mut i = 0
-        while i < len(y) {
-            if preds[i] == y[i] { correct += 1 }
+        while i < y_true.len() {
+            if y_pred[i] == c && y_true[i] == c { tp_total += 1 }
+            else if y_pred[i] == c && y_true[i] != c { fp_total += 1 }
+            else if y_true[i] == c && y_pred[i] != c { fn_total += 1 }
             i += 1
         }
-        return correct as float / len(y) as float
+        k += 1
     }
+    let p = (tp_total as float) / ((tp_total + fp_total) as float)
+    let r = (tp_total as float) / ((tp_total + fn_total) as float)
+    return f1(p, r)
 }
 
 fn main() {
-    let model = F1Score .new({"learning_rate": 0.01, "iterations": 100})
-    let X = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-    let y = [0, 1, 1]
-    model.fit(X, y)
-    println("F1 Score trained: " + model.score(X, y) as str)
+    // 3-class task
+    let yt = [0, 1, 2, 0, 1, 2, 0, 1, 2, 2]
+    let yp = [0, 1, 1, 0, 2, 2, 0, 1, 2, 0]
+    println("F1 macro    = " + f1_macro(yt, yp) as str)
+    println("F1 weighted = " + f1_weighted(yt, yp) as str)
+    println("F1 micro    = " + f1_micro(yt, yp) as str)
+    println("F1 binary   = " + f1_binary([1, 0, 1, 1, 0], [1, 0, 0, 1, 1]) as str)
 }
